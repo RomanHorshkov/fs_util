@@ -91,10 +91,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd -- "${ROOT_DIR}"
 
-# Load the canonical GCC build-profile definitions from the shared compilation
-# directory so derived builds such as release_cov can reuse the same flag
-# policy.
-PROFILE_FILE="${ROOT_DIR}/../compilation/gcc_build_profiles.sh"
+# Load the canonical GCC build-profile definitions from this repository's local
+# utils directory so derived builds such as release_cov reuse the same policy
+# without depending on any sibling checkout.
+PROFILE_FILE="${SCRIPT_DIR}/gcc_build_profiles.sh"
+
+if [[ ! -f "${PROFILE_FILE}" ]]; then
+    printf 'gcc profile file not found: %s\n' "${PROFILE_FILE}" >&2
+    exit 1
+fi
+
 source "${PROFILE_FILE}"
 
 LIB_BUILD_DIR="${ROOT_DIR}/build"
