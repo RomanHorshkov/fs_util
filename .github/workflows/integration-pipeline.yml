@@ -8,43 +8,100 @@ on:
 permissions:
   contents: read
 
-jobs:
-  integration:
-    name: build, test, archive
-    runs-on: ubuntu-latest
+env:
+  FSUTIL_RESULTS_RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
 
-    env:
-      FSUTIL_RESULTS_RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Install test dependencies
+      - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes libcmocka-dev gcovr pkg-config file
+          sudo apt-get install --yes file gcovr
 
       - name: Ensure utility scripts are executable
         run: chmod +x utils/*.sh
 
-      - name: Prepare result archive directory
-        run: mkdir -p "tests/results/ITs/runs/${FSUTIL_RESULTS_RUN_ID}"
-
       - name: Build libraries
-        shell: bash
+        run: ./utils/run_pipeline.sh build
+
+      - name: Upload build context
+        uses: actions/upload-artifact@v4
+        with:
+          name: fsutil-build-context-${{ env.FSUTIL_RESULTS_RUN_ID }}
+          path: |
+            build
+            tests/results/ITs/runs/${{ env.FSUTIL_RESULTS_RUN_ID }}
+          retention-days: 1
+          if-no-files-found: error
+
+  build_its:
+    name: build_ITs
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install integration-build dependencies
         run: |
-          set -euo pipefail
-          ./utils/build_libs.sh 2>&1 | tee "tests/results/ITs/runs/${FSUTIL_RESULTS_RUN_ID}/build_libs.log"
+          sudo apt-get update
+          sudo apt-get install --yes file libcmocka-dev pkg-config
+
+      - name: Ensure utility scripts are executable
+        run: chmod +x utils/*.sh
+
+      - name: Download build context
+        uses: actions/download-artifact@v4
+        with:
+          name: fsutil-build-context-${{ env.FSUTIL_RESULTS_RUN_ID }}
+          path: .
 
       - name: Build integration tests
-        shell: bash
+        run: ./utils/run_pipeline.sh build_ITs
+
+      - name: Upload test context
+        uses: actions/upload-artifact@v4
+        with:
+          name: fsutil-test-context-${{ env.FSUTIL_RESULTS_RUN_ID }}
+          path: |
+            build
+            tests/results/ITs/runs/${{ env.FSUTIL_RESULTS_RUN_ID }}
+          retention-days: 1
+          if-no-files-found: error
+
+  run_its:
+    name: run_ITs
+    needs: build_its
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install integration-run dependencies
         run: |
-          set -euo pipefail
-          ./utils/build_ITs.sh 2>&1 | tee "tests/results/ITs/runs/${FSUTIL_RESULTS_RUN_ID}/build_ITs.log"
+          sudo apt-get update
+          sudo apt-get install --yes file gcovr libcmocka-dev pkg-config
+
+      - name: Ensure utility scripts are executable
+        run: chmod +x utils/*.sh
+
+      - name: Download test context
+        uses: actions/download-artifact@v4
+        with:
+          name: fsutil-test-context-${{ env.FSUTIL_RESULTS_RUN_ID }}
+          path: .
 
       - name: Run integration tests
-        run: ./utils/run_ITs.sh
+        run: ./utils/run_pipeline.sh run_ITs
 
       - name: Publish job summary
         if: always()
@@ -54,8 +111,15 @@ jobs:
             echo '## fsutil integration pipeline'
             echo
             echo "- Run id: \`${FSUTIL_RESULTS_RUN_ID}\`"
-            echo '- Archived HTML entrypoint: `tests/results/ITs/index.html`'
-            echo '- Archived latest run entrypoint: `tests/results/ITs/latest/index.html`'
+            echo '- Job graph: `build -> build_ITs -> run_ITs`'
+            echo '- HTML results are generated in the workspace and uploaded below as a short-lived artifact.'
+            echo '- GitHub Actions job summaries support Markdown, not arbitrary HTML rendering.'
+            echo
+            echo '### Result paths'
+            echo
+            echo '- Overview: `tests/results/ITs/index.html`'
+            echo '- Latest run summary: `tests/results/ITs/integration_result.txt`'
+            echo "- Archived run root: \`tests/results/ITs/runs/${FSUTIL_RESULTS_RUN_ID}\`"
             echo
             echo '### Text summary'
             echo
@@ -72,43 +136,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fsutil-integration-results
+          name: fsutil-integration-results-${{ env.FSUTIL_RESULTS_RUN_ID }}
           path: tests/results/ITs
+          retention-days: 1
           if-no-files-found: error
-
-  pages:
-    name: publish results to GitHub Pages
-    if: >
-      vars.ENABLE_RESULTS_PAGES == '1' &&
-      github.event_name == 'push' &&
-      github.ref_name == github.event.repository.default_branch
-    needs: integration
-    runs-on: ubuntu-latest
-
-    permissions:
-      contents: read
-      pages: write
-      id-token: write
-
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-
-    steps:
-      - name: Download integration results artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: fsutil-integration-results
-          path: site
-
-      - name: Configure GitHub Pages
-        uses: actions/configure-pages@v5
-
-      - name: Upload GitHub Pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: site
-
-      - name: Deploy GitHub Pages site
-        id: deployment
-        uses: actions/deploy-pages@v4

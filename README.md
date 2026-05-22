@@ -76,12 +76,12 @@ workflow:
 
 That workflow:
 
-1. builds every library profile
-2. builds every integration-test executable against the discovered libraries
-3. runs the discovered executables
+1. runs `build`
+2. runs `build_ITs`
+3. runs `run_ITs`
 4. archives logs and coverage outputs into a run-specific result directory
-5. uploads the whole result tree as a GitHub Actions artifact
-6. can publish the HTML result tree to GitHub Pages when enabled
+5. passes the workspace state between jobs with short-lived artifacts
+6. uploads the final result tree as a short-lived GitHub Actions artifact
 
 The workflow is intentionally split into stages:
 
@@ -104,9 +104,7 @@ sudo apt install gcovr
 Sequence:
 
 ```sh
-./utils/build_libs.sh
-./utils/build_ITs.sh
-./utils/run_ITs.sh
+./utils/run_pipeline.sh
 ```
 
 Build test executables:
@@ -119,6 +117,14 @@ Run discovered test executables:
 
 ```sh
 ./utils/run_ITs.sh
+```
+
+Pipeline stages, if you want the CI-style split locally:
+
+```sh
+./utils/run_pipeline.sh build
+./utils/run_pipeline.sh build_ITs
+./utils/run_pipeline.sh run_ITs
 ```
 
 Outputs:
@@ -151,23 +157,24 @@ Pipeline file:
 
 - `.github/workflows/integration-pipeline.yml`
 
-The CI job is intentionally simple:
+The CI pipeline is intentionally simple:
 
 1. checkout
-2. install `libcmocka-dev`, `gcovr`, `pkg-config`, and `file`
-3. run `./utils/build_libs.sh`
-4. run `./utils/build_ITs.sh`
-5. run `./utils/run_ITs.sh`
-6. upload `tests/results/ITs/` as the `fsutil-integration-results` artifact
+2. run `./utils/run_pipeline.sh build`
+3. pass `build/` plus the archived run directory to the next job
+4. run `./utils/run_pipeline.sh build_ITs`
+5. pass the updated workspace state to the final job
+6. run `./utils/run_pipeline.sh run_ITs`
+7. upload `tests/results/ITs/` as a short-lived results artifact
 
 Browser story:
 
 - the artifact contains `tests/results/ITs/index.html` as the HTML entrypoint
 - the workflow also keeps `tests/results/ITs/latest/index.html` for the latest
   archived run inside that artifact
-- if repository variable `ENABLE_RESULTS_PAGES=1` is set and GitHub Pages is
-  enabled for Actions, the same HTML result tree is published automatically on
-  pushes to the default branch
+- the GitHub Actions run page gets a Markdown job summary, because the run UI
+  can display Markdown summaries but does not render the generated HTML pages
+  inline
 
 ## API notes
 
