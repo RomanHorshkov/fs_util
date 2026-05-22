@@ -551,12 +551,14 @@ if [[ ! -d "${TEST_BUILD_DIR}" ]]; then
     exit 1
 fi
 
-# Discover executable test artifacts only.
+# Discover test artifacts by their canonical names.
 #
-# The build step leaves objects and executables in the same profile directories,
-# so we filter explicitly for the executable test names.
+# We do not rely on the executable bit here because GitHub Actions artifact
+# upload/download normalizes file permissions across jobs. The known test
+# binaries therefore need to be rediscovered by name and re-marked executable
+# before they are launched.
 mapfile -t test_executables < <(
-    find "${TEST_BUILD_DIR}" -mindepth 2 -maxdepth 2 -type f -executable \
+    find "${TEST_BUILD_DIR}" -mindepth 2 -maxdepth 2 -type f \
         \( -name 'integration_test.shared' -o -name 'integration_test.static' \) \
         | sort
 )
@@ -583,6 +585,8 @@ for test_executable in "${test_executables[@]}"; do
     printf '\n[%s / %s]\n' "${profile}" "${variant}"
     printf '  running:  %s\n' "${test_executable}"
     printf '  log file: %s\n' "${log_file}"
+
+    chmod u+x "${test_executable}"
 
     run_rc=0
     {
