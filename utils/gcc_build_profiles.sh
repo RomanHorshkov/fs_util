@@ -178,16 +178,6 @@ _print_array() {
     printf '\n'
 }
 
-#
-# Keep ThreadSanitizer available for explicit concurrency work, but exclude it
-# from the default automated lineup. The normal build/test scripts should focus
-# on profiles that are expected to produce actionable results on this host.
-#
-# Set GCC_BUILD_ENABLE_TSAN=1 to append tsan back into the exported profile
-# list for a deliberate run.
-#
-GCC_BUILD_ENABLE_TSAN="${GCC_BUILD_ENABLE_TSAN:-0}"
-
 GCC_BUILD_PROFILES=(
   debug
   audit
@@ -195,11 +185,8 @@ GCC_BUILD_PROFILES=(
   release
   native
   extreme
+  tsan
 )
-
-if [[ "${GCC_BUILD_ENABLE_TSAN}" == "1" ]]; then
-    GCC_BUILD_PROFILES+=(tsan)
-fi
 
 # =============================================================================
 # MARK: Language And Platform Policy
@@ -261,10 +248,6 @@ fi
 #     preferable.
 #
 
-CFLAGS_LANGUAGE=(
-  -std=c11
-)
-
 CPPFLAGS_FEATURES=(
   # -D_GNU_SOURCE
   -D_POSIX_C_SOURCE=200809L
@@ -281,6 +264,59 @@ CPPFLAGS_INCLUDES=(
 CPPFLAGS_BASE=(
   "${CPPFLAGS_FEATURES[@]}"
   "${CPPFLAGS_INCLUDES[@]}"
+)
+
+FORTIFY_SOURCE_LEVEL="${FORTIFY_SOURCE_LEVEL:-3}"
+
+CPPFLAGS_FORTIFY=(
+  # -U_FORTIFY_SOURCE
+  #   Undefine _FORTIFY_SOURCE if inherited from environment or distro flags.
+  -U_FORTIFY_SOURCE
+
+  # -D_FORTIFY_SOURCE=<level>
+  #   Enables extra glibc checks for certain libc calls when optimization is on.
+  #
+  #   Examples: memcpy, strcpy, sprintf, etc., may get compile-time or runtime
+  #   object-size checks.
+  #
+  #   Requires optimization to be useful: -O1 or higher.
+  #   Runtime cost: usually small, sometimes none, occasionally measurable.
+  #   Portability: glibc-specific. Level 3 requires sufficiently recent glibc/GCC.
+  #
+  #   GCC's hardened profile falls back to level 2 on older glibc. Match that
+  #   manually when needed with:
+  #       FORTIFY_SOURCE_LEVEL=2 ./gcc_build_profiles.sh print-cppflags release
+  -D_FORTIFY_SOURCE="${FORTIFY_SOURCE_LEVEL}"
+)
+
+CPPFLAGS_RELEASE_POLICY=(
+  # -DNDEBUG
+  #   Disables assert() from <assert.h>.
+  #
+  #   Runtime: removes assertion checks.
+  #   Risk: if your program relies on assert side effects, the program is wrong.
+  #   Never write:
+  #       assert(init_thing() == 0);
+  #   if init_thing() must run in release.
+  -DNDEBUG
+)
+
+CPPFLAGS_HARDENING=(
+  "${CPPFLAGS_FORTIFY[@]}"
+)
+
+CPPFLAGS_EXTREME_POLICY=(
+  # -U_FORTIFY_SOURCE
+  #   Undefine _FORTIFY_SOURCE if inherited from environment or distro flags.
+  #
+  #   Runtime: may remove some libc object-size checks.
+  #   Safety: worse.
+  #   Use only when you explicitly want no fortify overhead/checking.
+  -U_FORTIFY_SOURCE
+)
+
+CFLAGS_LANGUAGE=(
+  -std=c11
 )
 
 CFLAGS_BASE=(
@@ -667,13 +703,15 @@ CFLAGS_WARN_PARANOID=(
   #   Useful for header hygiene, but can be noisy if system headers or legacy
   #   patterns repeat declarations.
   -Wredundant-decls
+)
 
+CFLAGS_WARN_EXPERIMENTAL=(
   # -Wstrict-overflow=5
   #   Warn about optimizations based on the assumption that signed overflow is
   #   undefined behavior.
   #
-  #   This can be very noisy. It is useful when auditing integer-heavy code.
-  #   Do not blindly panic at every warning; inspect the expression.
+  #   GCC documents level 5 as very noisy. Keep it for audit-style integer
+  #   reviews, but do not make it part of normal release policy.
   -Wstrict-overflow=5
 )
 
@@ -768,6 +806,13 @@ CFLAGS_SANITIZER_THREAD=(
   -fsanitize=thread
 )
 
+CFLAGS_SANITIZER_DIAGNOSTICS=(
+  # -fno-optimize-sibling-calls
+  #   Preserve more call frames in sanitizer reports. This pairs with
+  #   -fno-omit-frame-pointer for clearer backtraces.
+  -fno-optimize-sibling-calls
+)
+
 # Link-time sanitizer note
 # ------------------------
 # For GCC driver links, sanitizer flags must be present at link time too so the
@@ -843,6 +888,15 @@ LDFLAGS_INSTRUMENT_COVERAGE=(
 # profiles by default, and should only be removed in the extreme profile when
 # lower overhead is explicitly more important than defensive hardening.
 #
+CFLAGS_EXE_HARDENING=(
+  # -fPIE
+  #   Generate position-independent code suitable for PIE executables.
+  #
+  #   Executable release hardening: pair with -pie at link time.
+  #   Shared libraries should normally use -fPIC and -shared instead.
+  -fPIE
+)
+
 CFLAGS_HARDENING_FLAGS=(
   # -fstack-protector-strong
   #   Adds stack canary checks to functions that are more likely to suffer stack
@@ -892,21 +946,6 @@ CFLAGS_HARDENING_FLAGS=(
   #   Security value: good.
   -fstack-clash-protection
 
-  # -D_FORTIFY_SOURCE=3
-  #   Enables extra glibc checks for certain libc calls when optimization is on.
-  #
-  #   Examples: memcpy, strcpy, sprintf, etc., may get compile-time or runtime
-  #   object-size checks.
-  #
-  #   Requires optimization to be useful: -O1 or higher.
-  #   Runtime cost: usually small, sometimes none, occasionally measurable.
-  #   Portability: glibc-specific. Level 3 requires sufficiently recent glibc/GCC.
-  #
-  #   If toolchain rejects level 3, use:
-  #       -D_FORTIFY_SOURCE=2
-  -U_FORTIFY_SOURCE
-  -D_FORTIFY_SOURCE=3
-
   # -fno-common
   #   Make tentative global definitions behave strictly.
   #
@@ -915,6 +954,32 @@ CFLAGS_HARDENING_FLAGS=(
   #
   #   Runtime cost: none.
   -fno-common
+)
+
+LDFLAGS_EXE_HARDENING=(
+  # -pie
+  #   Link a position-independent executable. Use for executable release
+  #   profiles, not shared-library links.
+  -pie
+
+  # -Wl,-z,relro / -Wl,-z,now
+  #   Ask the linker for RELRO and immediate binding. This hardens executable
+  #   relocation tables at the cost of resolving symbols at startup.
+  -Wl,-z,relro
+  -Wl,-z,now
+)
+
+CFLAGS_SHARED=(
+  # -fPIC
+  #   Generate position-independent code suitable for shared libraries.
+  #   Use this instead of -fPIE when compiling objects for .so output.
+  -fPIC
+)
+
+LDFLAGS_SHARED=(
+  # -shared
+  #   Link a shared library. Keep this separate from executable -pie policy.
+  -shared
 )
 
 # =============================================================================
@@ -981,16 +1046,6 @@ CFLAGS_OPT_RELEASE=(
   #   Risk: can still make latent undefined behavior surface more aggressively
   #         than debug or sanitizer builds.
   -O2
-
-  # -DNDEBUG
-  #   Disables assert() from <assert.h>.
-  #
-  #   Runtime: removes assertion checks.
-  #   Risk: if your program relies on assert side effects, the program is wrong.
-  #   Never write:
-  #       assert(init_thing() == 0);
-  #   if init_thing() must run in release.
-  -DNDEBUG
 )
 
 CFLAGS_OPT_NATIVE=(
@@ -1005,16 +1060,6 @@ CFLAGS_OPT_NATIVE=(
   #   Binary size: may increase due to inlining/unrolling.
   #   Risk: can make latent undefined behavior surface more aggressively.
   -O3
-
-  # -DNDEBUG
-  #   Disables assert() from <assert.h>.
-  #
-  #   Runtime: removes assertion checks.
-  #   Risk: if your program relies on assert side effects, the program is wrong.
-  #   Never write:
-  #       assert(init_thing() == 0);
-  #   if init_thing() must run in release.
-  -DNDEBUG
 
   # -flto
   #   Link Time Optimization.
@@ -1042,10 +1087,6 @@ CFLAGS_OPT_EXTREME=(
   # -O3
   #   Same aggressive optimization as native.
   -O3
-
-  # -DNDEBUG
-  #   Remove assert() checks.
-  -DNDEBUG
 
   # -flto
   #   Whole-program-ish optimization at link time.
@@ -1076,14 +1117,6 @@ CFLAGS_OPT_EXTREME=(
   #
   #   Use only for the "I want the lightest fastest local binary" profile.
   -fno-stack-protector
-
-  # -U_FORTIFY_SOURCE
-  #   Undefine _FORTIFY_SOURCE if inherited from environment or distro flags.
-  #
-  #   Runtime: may remove some libc object-size checks.
-  #   Safety: worse.
-  #   Use only when you explicitly want no fortify overhead/checking.
-  -U_FORTIFY_SOURCE
 )
 
 # =============================================================================
@@ -1198,6 +1231,7 @@ LDFLAGS_DEBUG=()
 #
 CPPFLAGS_AUDIT=(
   "${CPPFLAGS_BASE[@]}"
+  "${CPPFLAGS_HARDENING[@]}"
 )
 
 CFLAGS_AUDIT=(
@@ -1206,6 +1240,7 @@ CFLAGS_AUDIT=(
   "${CFLAGS_WARN_API[@]}"
   "${CFLAGS_WARN_STRICT[@]}"
   "${CFLAGS_WARN_PARANOID[@]}"
+  "${CFLAGS_WARN_EXPERIMENTAL[@]}"
   "${CFLAGS_OPT_CHECKED[@]}"
   "${CFLAGS_DEBUG_INFO[@]}"
   "${CFLAGS_GCC_ANALYZER[@]}"
@@ -1240,6 +1275,7 @@ LDFLAGS_AUDIT=()
 #
 CPPFLAGS_SANITIZE=(
   "${CPPFLAGS_BASE[@]}"
+  "${CPPFLAGS_HARDENING[@]}"
 )
 
 CFLAGS_SANITIZE=(
@@ -1251,6 +1287,7 @@ CFLAGS_SANITIZE=(
   "${CFLAGS_OPT_CHECKED[@]}"
   "${CFLAGS_DEBUG_INFO[@]}"
   "${CFLAGS_SANITIZER_ADDRESS[@]}"
+  "${CFLAGS_SANITIZER_DIAGNOSTICS[@]}"
   "${CFLAGS_HARDENING_FLAGS[@]}"
 )
 
@@ -1282,6 +1319,8 @@ LDFLAGS_SANITIZE=(
 #
 CPPFLAGS_RELEASE=(
   "${CPPFLAGS_BASE[@]}"
+  "${CPPFLAGS_HARDENING[@]}"
+  "${CPPFLAGS_RELEASE_POLICY[@]}"
 )
 
 CFLAGS_RELEASE=(
@@ -1290,10 +1329,13 @@ CFLAGS_RELEASE=(
   "${CFLAGS_WARN_API[@]}"
   "${CFLAGS_WARN_STRICT[@]}"
   "${CFLAGS_OPT_RELEASE[@]}"
+  "${CFLAGS_EXE_HARDENING[@]}"
   "${CFLAGS_HARDENING_FLAGS[@]}"
 )
 
-LDFLAGS_RELEASE=()
+LDFLAGS_RELEASE=(
+  "${LDFLAGS_EXE_HARDENING[@]}"
+)
 
 # MARK: Native Profile
 # NATIVE PROFILE
@@ -1319,6 +1361,8 @@ LDFLAGS_RELEASE=()
 #
 CPPFLAGS_NATIVE=(
   "${CPPFLAGS_BASE[@]}"
+  "${CPPFLAGS_HARDENING[@]}"
+  "${CPPFLAGS_RELEASE_POLICY[@]}"
 )
 
 CFLAGS_NATIVE=(
@@ -1327,11 +1371,13 @@ CFLAGS_NATIVE=(
   "${CFLAGS_WARN_API[@]}"
   "${CFLAGS_WARN_STRICT[@]}"
   "${CFLAGS_OPT_NATIVE[@]}"
+  "${CFLAGS_EXE_HARDENING[@]}"
   "${CFLAGS_HARDENING_FLAGS[@]}"
 )
 
 LDFLAGS_NATIVE=(
   "${LDFLAGS_LTO[@]}"
+  "${LDFLAGS_EXE_HARDENING[@]}"
 )
 
 # MARK: Extreme Profile
@@ -1358,6 +1404,8 @@ LDFLAGS_NATIVE=(
 #
 CPPFLAGS_EXTREME=(
   "${CPPFLAGS_BASE[@]}"
+  "${CPPFLAGS_RELEASE_POLICY[@]}"
+  "${CPPFLAGS_EXTREME_POLICY[@]}"
 )
 
 CFLAGS_EXTREME=(
@@ -1403,6 +1451,7 @@ CFLAGS_TSAN=(
   "${CFLAGS_OPT_CHECKED[@]}"
   "${CFLAGS_DEBUG_INFO[@]}"
   "${CFLAGS_SANITIZER_THREAD[@]}"
+  "${CFLAGS_SANITIZER_DIAGNOSTICS[@]}"
   -fno-common
 )
 
@@ -1448,7 +1497,7 @@ LDFLAGS_TSAN=(
 #       Runtime cost: usually tiny
 #       Binary size: slightly higher
 #
-#   -D_FORTIFY_SOURCE=3
+#   -D_FORTIFY_SOURCE=<level>
 #       Compile time: low
 #       Runtime cost: usually low/tiny
 #       Binary size: maybe slightly higher
@@ -1544,13 +1593,13 @@ LDFLAGS_TSAN=(
 #   Do not enable -Werror in this file by default; doing so makes compiler
 #   upgrades and third-party headers unnecessarily painful.
 #
-# Optional linker hardening:
-#   Many projects also want PIE / RELRO / NOW:
+# Executable linker hardening:
+#   release and native include PIE / RELRO / NOW for executable builds:
 #       -fPIE
-#       -Wl,-pie
+#       -pie
 #       -Wl,-z,relro
 #       -Wl,-z,now
-#   Keep that decision project-specific because deployment models vary.
+#   Shared-library builds should use their own -fPIC / -shared policy instead.
 #
 # =============================================================================
 # MARK: CLI
