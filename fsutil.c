@@ -8,17 +8,17 @@
  */
 
 #ifndef _GNU_SOURCE
-#define _GNU_SOURCE
+#    define _GNU_SOURCE
 #endif
 
 #include "fsutil.h"
 
 #include <errno.h>
 #include <fcntl.h>
-#include <limits.h>     /* NAME_MAX */
-#include <stdio.h>      /* renameat */
-#include <unistd.h>     /* close, fsync, unlinkat, fchmod, fstat, geteuid, getegid */
-#include <string.h>     /* memcpy, strcmp, strchr */
+#include <limits.h> /* NAME_MAX */
+#include <stdio.h>  /* renameat */
+#include <string.h> /* memcpy, strcmp, strchr */
+#include <unistd.h> /* close, fsync, unlinkat, fchmod, fstat, geteuid, getegid */
 
 /****************************************************************************
  * PRIVATE DEFINES
@@ -86,9 +86,7 @@ static int _fs_mode_is_valid(mode_t mode);
  *
  * When expect is null, only object-kind verification is performed.
  */
-static int _fs_verify_stat(const struct stat*         st,
-                           enum _fs_verify_object_kind object_kind,
-                           const fs_expect_t*         expect);
+static int _fs_verify_stat(const struct stat* st, enum _fs_verify_object_kind object_kind, const fs_expect_t* expect);
 
 /**
  * @brief Parse the next component from a relative walk path.
@@ -101,10 +99,7 @@ static int _fs_verify_stat(const struct stat*         st,
  *
  * Repeated '/' characters are collapsed naturally.
  */
-static int _fs_component_next(const char** cursor,
-                              char*        out_component,
-                              size_t       out_component_size,
-                              enum _fs_component_state* out_state);
+static int _fs_component_next(const char** cursor, char* out_component, size_t out_component_size, enum _fs_component_state* out_state);
 
 /**
  * @brief Duplicate a directory fd with FD_CLOEXEC preserved.
@@ -173,8 +168,7 @@ void fs_dir_close(fs_dir_t* dir)
     if(!dir) return;
 
     /* Close the owned fd only when the handle currently owns one. */
-    if(dir->fd >= 0)
-        (void)close(dir->fd);
+    if(dir->fd >= 0) (void)close(dir->fd);
 
     /* Restore the exact canonical closed state regardless of prior value. */
     dir->fd = -1;
@@ -242,10 +236,7 @@ int fs_file_verify(int fd, const fs_expect_t* expect)
     return _fs_verify_stat(&st, _FS_VERIFY_OBJECT_REGULAR_FILE, expect);
 }
 
-int fs_dir_open_at(const fs_dir_t* parent,
-                   const char*     name,
-                   const fs_expect_t* expect,
-                   fs_dir_t*       out_dir)
+int fs_dir_open_at(const fs_dir_t* parent, const char* name, const fs_expect_t* expect, fs_dir_t* out_dir)
 {
     /* Check input. */
     if(!parent || parent->fd < 0 || !out_dir) return -EINVAL;
@@ -274,11 +265,7 @@ int fs_dir_open_at(const fs_dir_t* parent,
     return 0;
 }
 
-int fs_dir_create_at(const fs_dir_t* parent,
-                     const char*     name,
-                     mode_t          create_mode,
-                     const fs_expect_t* expect,
-                     fs_dir_t*       out_dir,
+int fs_dir_create_at(const fs_dir_t* parent, const char* name, mode_t create_mode, const fs_expect_t* expect, fs_dir_t* out_dir,
                      enum fs_create_disposition* out_disposition)
 {
     /* Check input. */
@@ -316,8 +303,7 @@ int fs_dir_create_at(const fs_dir_t* parent,
     if(fd < 0)
     {
         int saved_errno = errno;
-        if(create_disposition == FS_CREATE_DISPOSITION_CREATED_NEW)
-            _fs_cleanup_created_directory_at(parent->fd, name);
+        if(create_disposition == FS_CREATE_DISPOSITION_CREATED_NEW) _fs_cleanup_created_directory_at(parent->fd, name);
         return -saved_errno;
     }
 
@@ -337,7 +323,7 @@ int fs_dir_create_at(const fs_dir_t* parent,
     {
         /* Verify the freshly-created directory has the explicit requested mode. */
         fs_expect_t created_expect = fs_expect_make(create_mode, FS_EXPECT_ANY_UID, FS_EXPECT_ANY_GID);
-        rc = fs_dir_verify(&(fs_dir_t){.fd = fd}, &created_expect);
+        rc                         = fs_dir_verify(&(fs_dir_t){.fd = fd}, &created_expect);
         if(rc != 0)
         {
             /* Verification failure means we must not leak the temporary fd. */
@@ -353,8 +339,7 @@ int fs_dir_create_at(const fs_dir_t* parent,
     {
         /* Verification failure means we must not leak the temporary fd. */
         close(fd);
-        if(create_disposition == FS_CREATE_DISPOSITION_CREATED_NEW)
-            _fs_cleanup_created_directory_at(parent->fd, name);
+        if(create_disposition == FS_CREATE_DISPOSITION_CREATED_NEW) _fs_cleanup_created_directory_at(parent->fd, name);
         return rc;
     }
 
@@ -366,10 +351,7 @@ int fs_dir_create_at(const fs_dir_t* parent,
     return 0;
 }
 
-int fs_dir_walk_open(const fs_dir_t* start,
-                     const char*     relative_path,
-                     const fs_expect_t* expect,
-                     fs_dir_t*       out_dir)
+int fs_dir_walk_open(const fs_dir_t* start, const char* relative_path, const fs_expect_t* expect, fs_dir_t* out_dir)
 {
     /* Check input. */
     if(!start || start->fd < 0 || !relative_path || !out_dir) return -EINVAL;
@@ -381,17 +363,17 @@ int fs_dir_walk_open(const fs_dir_t* start,
     if(rc != 0) return rc;
 
     /* Walk relative_path one component at a time from the starting capability. */
-    const char* cursor      = relative_path;
-    int         parent_fd   = start->fd;
-    int         current_fd  = -1;
+    const char* cursor                 = relative_path;
+    int         parent_fd              = start->fd;
+    int         current_fd             = -1;
     size_t      walked_component_count = 0U;
 
     for(;;)
     {
         /* Parse the next relative path component. */
-        char component[NAME_MAX + 1];
+        char                     component[NAME_MAX + 1];
         enum _fs_component_state component_state = _FS_COMPONENT_STATE_END;
-        rc = _fs_component_next(&cursor, component, sizeof(component), &component_state);
+        rc                                       = _fs_component_next(&cursor, component, sizeof(component), &component_state);
         if(rc != 0)
         {
             /* Failure during walk must not leak any transient fd. */
@@ -450,11 +432,7 @@ int fs_dir_walk_open(const fs_dir_t* start,
     return 0;
 }
 
-int fs_dir_walk_create(const fs_dir_t* start,
-                       const char*     relative_path,
-                       mode_t          create_mode,
-                       const fs_expect_t* expect,
-                       fs_dir_t*       out_dir)
+int fs_dir_walk_create(const fs_dir_t* start, const char* relative_path, mode_t create_mode, const fs_expect_t* expect, fs_dir_t* out_dir)
 {
     /* Check input. */
     if(!start || start->fd < 0 || !relative_path || !out_dir) return -EINVAL;
@@ -467,17 +445,17 @@ int fs_dir_walk_create(const fs_dir_t* start,
     if(rc != 0) return rc;
 
     /* Walk relative_path one component at a time from the starting capability. */
-    const char* cursor      = relative_path;
-    int         parent_fd   = start->fd;
-    int         current_fd  = -1;
+    const char* cursor                 = relative_path;
+    int         parent_fd              = start->fd;
+    int         current_fd             = -1;
     size_t      walked_component_count = 0U;
 
     for(;;)
     {
         /* Parse the next relative path component. */
-        char component[NAME_MAX + 1];
+        char                     component[NAME_MAX + 1];
         enum _fs_component_state component_state = _FS_COMPONENT_STATE_END;
-        rc = _fs_component_next(&cursor, component, sizeof(component), &component_state);
+        rc                                       = _fs_component_next(&cursor, component, sizeof(component), &component_state);
         if(rc != 0)
         {
             /* Failure during walk must not leak any transient fd. */
@@ -501,12 +479,7 @@ int fs_dir_walk_create(const fs_dir_t* start,
         /* Create-or-open exactly one child directory component. */
         fs_dir_t next_dir;
         fs_dir_init(&next_dir);
-        rc = fs_dir_create_at(&(fs_dir_t){.fd = parent_fd},
-                              component,
-                              create_mode,
-                              expect,
-                              &next_dir,
-                              NULL);
+        rc = fs_dir_create_at(&(fs_dir_t){.fd = parent_fd}, component, create_mode, expect, &next_dir, NULL);
         if(rc != 0)
         {
             /* Failure during walk must not leak any transient fd. */
@@ -534,10 +507,7 @@ int fs_dir_walk_create(const fs_dir_t* start,
     return 0;
 }
 
-int fs_file_open_read_at(const fs_dir_t* parent,
-                         const char*     name,
-                         const fs_expect_t* expect,
-                         int*            out_fd)
+int fs_file_open_read_at(const fs_dir_t* parent, const char* name, const fs_expect_t* expect, int* out_fd)
 {
     /* Check output pointer first so raw-fd ownership is reset whenever possible. */
     if(!out_fd) return -EINVAL;
@@ -559,9 +529,7 @@ int fs_file_open_read_at(const fs_dir_t* parent,
      * verification rejects them, and O_NOCTTY avoids controlling-terminal
      * side effects if the path names a terminal-like device.
      */
-    int fd = openat(parent->fd,
-                    name,
-                    O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY);
+    int fd = openat(parent->fd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY);
     if(fd < 0) return -errno;
 
     /* Verify the opened child before returning its fd to the caller. */
@@ -596,11 +564,7 @@ int fs_file_open_read_at(const fs_dir_t* parent,
     return 0;
 }
 
-int fs_file_create_write_new_at(const fs_dir_t* parent,
-                                const char*     name,
-                                mode_t          create_mode,
-                                const fs_expect_t* expect,
-                                int*            out_fd)
+int fs_file_create_write_new_at(const fs_dir_t* parent, const char* name, mode_t create_mode, const fs_expect_t* expect, int* out_fd)
 {
     /* Check output pointer first so raw-fd ownership is reset whenever possible. */
     if(!out_fd) return -EINVAL;
@@ -618,10 +582,7 @@ int fs_file_create_write_new_at(const fs_dir_t* parent,
     if(rc != 0) return rc;
 
     /* Create a brand-new child file, rejecting a final symlink and avoiding controlling-terminal side effects. */
-    int fd = openat(parent->fd,
-                    name,
-                    O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW | O_NOCTTY,
-                    create_mode);
+    int fd = openat(parent->fd, name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW | O_NOCTTY, create_mode);
     if(fd < 0) return -errno;
 
     /*
@@ -638,7 +599,7 @@ int fs_file_create_write_new_at(const fs_dir_t* parent,
 
     /* Verify the freshly-created file has the explicit requested mode. */
     fs_expect_t created_expect = fs_expect_make(create_mode, FS_EXPECT_ANY_UID, FS_EXPECT_ANY_GID);
-    rc = fs_file_verify(fd, &created_expect);
+    rc                         = fs_file_verify(fd, &created_expect);
     if(rc != 0)
     {
         /* Verification failure means we must not leak the temporary fd. */
@@ -662,10 +623,7 @@ int fs_file_create_write_new_at(const fs_dir_t* parent,
     return 0;
 }
 
-int fs_rename_at(const fs_dir_t* old_parent,
-                 const char*     old_name,
-                 const fs_dir_t* new_parent,
-                 const char*     new_name)
+int fs_rename_at(const fs_dir_t* old_parent, const char* old_name, const fs_dir_t* new_parent, const char* new_name)
 {
     /* Check input. */
     if(!old_parent || old_parent->fd < 0 || !new_parent || new_parent->fd < 0) return -EINVAL;
@@ -725,9 +683,7 @@ int fs_file_fsync(int fd)
  ****************************************************************************
  */
 
-static int _fs_verify_stat(const struct stat*         st,
-                           enum _fs_verify_object_kind object_kind,
-                           const fs_expect_t*         expect)
+static int _fs_verify_stat(const struct stat* st, enum _fs_verify_object_kind object_kind, const fs_expect_t* expect)
 {
     /* Check input. */
     if(!st) return -EINVAL;
@@ -735,17 +691,17 @@ static int _fs_verify_stat(const struct stat*         st,
     /* Verify the object type first; mode/uid/gid checks happen only afterwards. */
     switch(object_kind)
     {
-    case _FS_VERIFY_OBJECT_DIRECTORY:
-        if(!S_ISDIR(st->st_mode)) return -ENOTDIR;
-        break;
+        case _FS_VERIFY_OBJECT_DIRECTORY:
+            if(!S_ISDIR(st->st_mode)) return -ENOTDIR;
+            break;
 
-    case _FS_VERIFY_OBJECT_REGULAR_FILE:
-        if(S_ISDIR(st->st_mode)) return -EISDIR;
-        if(!S_ISREG(st->st_mode)) return -EINVAL;
-        break;
+        case _FS_VERIFY_OBJECT_REGULAR_FILE:
+            if(S_ISDIR(st->st_mode)) return -EISDIR;
+            if(!S_ISREG(st->st_mode)) return -EINVAL;
+            break;
 
-    default:
-        return -EINVAL;
+        default:
+            return -EINVAL;
     }
 
     /* Null expectation means "type check only". */
@@ -766,20 +722,17 @@ static int _fs_verify_stat(const struct stat*         st,
     return 0;
 }
 
-static int _fs_component_next(const char** cursor,
-                              char*        out_component,
-                              size_t       out_component_size,
-                              enum _fs_component_state* out_state)
+static int _fs_component_next(const char** cursor, char* out_component, size_t out_component_size, enum _fs_component_state* out_state)
 {
     /* Check input. */
-    if(!cursor || !*cursor || !out_component || out_component_size < 2 || !out_state)
-        return -EINVAL;
+    if(!cursor || !*cursor || !out_component || out_component_size < 2 || !out_state) return -EINVAL;
 
     /* Start from the current scan position. */
     const char* p = *cursor;
 
     /* Skip path separators so repeated '/' characters collapse naturally. */
-    while(*p == '/') ++p;
+    while(*p == '/')
+        ++p;
 
     /* No non-separator character means there are no more components. */
     if(*p == '\0')
@@ -793,7 +746,8 @@ static int _fs_component_next(const char** cursor,
     const char* start = p;
 
     /* Advance until the next separator or string terminator. */
-    while(*p != '\0' && *p != '/') ++p;
+    while(*p != '\0' && *p != '/')
+        ++p;
 
     /* Compute component length and ensure it fits into the caller buffer. */
     size_t len = (size_t)(p - start);

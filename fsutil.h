@@ -18,14 +18,11 @@
  ****************************************************************************
  */
 
-#include <stddef.h>     /* for size_t */
-#include <sys/stat.h>   /* for stat, mode_t */
-#include <sys/types.h>  /* for uid_t, gid_t */
+#include <stddef.h>    /* for size_t */
+#include <sys/stat.h>  /* for stat, mode_t */
+#include <sys/types.h> /* for uid_t, gid_t */
 
-#ifdef __cplusplus
-extern "C"
-{
-#endif
+
 
 /****************************************************************************
  * PUBLIC FUNCTIONS PROTOTYPES
@@ -233,9 +230,9 @@ typedef struct fs_expect
     gid_t  gid;
 } fs_expect_t;
 
-#define FS_EXPECT_ANY_MODE ((mode_t)-1)
-#define FS_EXPECT_ANY_UID  ((uid_t)-1)
-#define FS_EXPECT_ANY_GID  ((gid_t)-1)
+#define FS_EXPECT_ANY_MODE ((mode_t) - 1)
+#define FS_EXPECT_ANY_UID  ((uid_t) - 1)
+#define FS_EXPECT_ANY_GID  ((gid_t) - 1)
 #define FS_MODE_MASK       ((mode_t)07777)
 
 /**
@@ -401,10 +398,7 @@ int fs_file_verify(int fd, const fs_expect_t* expect);
  * - -ENOTDIR / -EACCES if verification fails
  * - other negative errno from openat(), fcntl(), or fstat()
  */
-int fs_dir_open_at(const fs_dir_t* parent,
-                   const char*     name,
-                   const fs_expect_t* expect,
-                   fs_dir_t*       out_dir);
+int fs_dir_open_at(const fs_dir_t* parent, const char* name, const fs_expect_t* expect, fs_dir_t* out_dir);
 
 /**
  * @brief Create or open a single directory component under a parent capability.
@@ -453,11 +447,7 @@ int fs_dir_open_at(const fs_dir_t* parent,
  * - other negative errno from mkdirat(), openat(), fchmod(), fcntl(), or
  *   fstat()
  */
-int fs_dir_create_at(const fs_dir_t* parent,
-                     const char*     name,
-                     mode_t          create_mode,
-                     const fs_expect_t* expect,
-                     fs_dir_t*       out_dir,
+int fs_dir_create_at(const fs_dir_t* parent, const char* name, mode_t create_mode, const fs_expect_t* expect, fs_dir_t* out_dir,
                      enum fs_create_disposition* out_disposition);
 
 /**
@@ -496,10 +486,7 @@ int fs_dir_create_at(const fs_dir_t* parent,
  * - -ENOTDIR / -EACCES if a walked component fails verification
  * - other negative errno from openat(), fcntl(), or fstat()
  */
-int fs_dir_walk_open(const fs_dir_t* start,
-                     const char*     relative_path,
-                     const fs_expect_t* expect,
-                     fs_dir_t*       out_dir);
+int fs_dir_walk_open(const fs_dir_t* start, const char* relative_path, const fs_expect_t* expect, fs_dir_t* out_dir);
 
 /**
  * @brief Walk a relative directory path, creating missing components as needed.
@@ -538,11 +525,7 @@ int fs_dir_walk_open(const fs_dir_t* start,
  * - -EBUSY if `out_dir` already owns an fd
  * - other negative errno propagated from fs_dir_create_at()
  */
-int fs_dir_walk_create(const fs_dir_t* start,
-                       const char*     relative_path,
-                       mode_t          create_mode,
-                       const fs_expect_t* expect,
-                       fs_dir_t*       out_dir);
+int fs_dir_walk_create(const fs_dir_t* start, const char* relative_path, mode_t create_mode, const fs_expect_t* expect, fs_dir_t* out_dir);
 
 /**
  * @brief Open an existing regular file for read-only access under a parent dir.
@@ -579,10 +562,7 @@ int fs_dir_walk_create(const fs_dir_t* start,
  * - before success returns, the helper restores blocking file-status flags on
  *   the returned fd
  */
-int fs_file_open_read_at(const fs_dir_t* parent,
-                         const char*     name,
-                         const fs_expect_t* expect,
-                         int*            out_fd);
+int fs_file_open_read_at(const fs_dir_t* parent, const char* name, const fs_expect_t* expect, int* out_fd);
 
 /**
  * @brief Create a brand new regular file for writing under a parent dir.
@@ -625,11 +605,7 @@ int fs_file_open_read_at(const fs_dir_t* parent,
  *   may attempt best-effort cleanup with unlinkat(..., 0)
  * - that cleanup is name-based under the trusted/private parent capability
  */
-int fs_file_create_write_new_at(const fs_dir_t* parent,
-                                const char*     name,
-                                mode_t          create_mode,
-                                const fs_expect_t* expect,
-                                int*            out_fd);
+int fs_file_create_write_new_at(const fs_dir_t* parent, const char* name, mode_t create_mode, const fs_expect_t* expect, int* out_fd);
 
 /**
  * @brief Rename a single path component from one directory capability to another.
@@ -652,10 +628,7 @@ int fs_file_create_write_new_at(const fs_dir_t* parent,
  *
  * @return 0 on success, negative errno on failure.
  */
-int fs_rename_at(const fs_dir_t* old_parent,
-                 const char*     old_name,
-                 const fs_dir_t* new_parent,
-                 const char*     new_name);
+int fs_rename_at(const fs_dir_t* old_parent, const char* old_name, const fs_dir_t* new_parent, const char* new_name);
 
 /**
  * @brief Unlink a single non-directory entry under a directory capability.
@@ -707,8 +680,6 @@ int fs_dir_fsync(const fs_dir_t* dir);
  */
 int fs_file_fsync(int fd);
 
-#ifdef __cplusplus
-}
-#endif
+
 
 #endif /* FSUTIL_H */

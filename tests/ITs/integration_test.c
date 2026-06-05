@@ -1,7 +1,7 @@
+#include <cmocka.h>
+#include <setjmp.h>
 #include <stdarg.h>
 #include <stddef.h>
-#include <setjmp.h>
-#include <cmocka.h>
 
 #include <dirent.h>
 #include <errno.h>
@@ -131,8 +131,7 @@ static int remove_tree_at(int dir_fd)
         struct dirent* entry = readdir(dir);
         if(entry == NULL) break;
 
-        if(strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
-            continue;
+        if(strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
 
         struct stat st;
         if(fstatat(dir_fd, entry->d_name, &st, AT_SYMLINK_NOFOLLOW) != 0)
@@ -143,9 +142,7 @@ static int remove_tree_at(int dir_fd)
 
         if(S_ISDIR(st.st_mode))
         {
-            int child_fd = openat(dir_fd,
-                                  entry->d_name,
-                                  O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+            int child_fd = openat(dir_fd, entry->d_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
             if(child_fd < 0)
             {
                 rc = -1;
@@ -443,7 +440,7 @@ static void test_expectations_and_cloexec_enforcement(void** state)
 {
     test_env_t* env = *state;
     fs_dir_t    root;
-    fs_dir_t    non_cloexec_dir = { .fd = -1 };
+    fs_dir_t    non_cloexec_dir  = {.fd = -1};
     int         non_cloexec_file = -1;
     int         cloexec_file     = -1;
     fs_expect_t mismatch_expect  = fs_expect_make(0644, FS_EXPECT_ANY_UID, FS_EXPECT_ANY_GID);
@@ -477,7 +474,7 @@ static void test_create_cleanup_on_expectation_mismatch(void** state)
     fs_dir_t    dir_out;
     int         file_fd = 123;
     int         rc;
-    fs_expect_t dir_expect = fs_expect_make(0755, FS_EXPECT_ANY_UID, FS_EXPECT_ANY_GID);
+    fs_expect_t dir_expect  = fs_expect_make(0755, FS_EXPECT_ANY_UID, FS_EXPECT_ANY_GID);
     fs_expect_t file_expect = fs_expect_make(0644, FS_EXPECT_ANY_UID, FS_EXPECT_ANY_GID);
 
     open_root_cap(env, &root);
