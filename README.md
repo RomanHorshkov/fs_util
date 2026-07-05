@@ -18,12 +18,15 @@ operate relative to it with `*at()`-style helpers.
 
 ## Layout
 
+- `VERSION` - package/library version
 - `fsutil.h` - public API
 - `fsutil.c` - implementation
-- `utils/` - build and test scripts
+- `utils/` - build, test, coverage, and packaging scripts
+- `tests/unit/` - cmocka unit tests
 - `tests/ITs/` - cmocka integration tests
-- `tests/results/ITs/` - test and coverage outputs
-- `build/` - generated objects, libraries, and test binaries
+- `tests/results/unit/` - unit-test and coverage outputs
+- `tests/results/ITs/` - integration-test and coverage outputs
+- `build/` - generated objects, libraries, test binaries, and `.deb` artifacts
 
 ## Platform
 
@@ -107,6 +110,24 @@ Sequence:
 ./utils/run_pipeline.sh
 ```
 
+Build unit-test executables:
+
+```sh
+./utils/build_unit_tests.sh
+```
+
+Run discovered unit-test executables:
+
+```sh
+./utils/run_unit_tests.sh
+```
+
+Run unit tests and emit a gcovr coverage report:
+
+```sh
+./utils/run_unit_coverage.sh
+```
+
 Build test executables:
 
 ```sh
@@ -150,6 +171,36 @@ Coverage note:
   exists and the tests were run against it
 - `build_libs.sh` can build `release_cov` when `gcov` and `gcovr` are available
 - the HTML index links to coverage automatically when those reports exist
+
+## Packaging
+
+Build the Debian package:
+
+```sh
+./utils/build_deb.sh
+```
+
+Compatibility wrapper:
+
+```sh
+./utils/make_deb.sh
+```
+
+Artifact:
+
+- `build/debs/libfsutil_<VERSION>_<ARCH>.deb`
+
+Installed payload:
+
+- `/usr/local/include/fsutil.h`
+- `/usr/local/include/utils/fsutil.h`
+- `/usr/local/lib/libfsutil.so.<VERSION>`
+- `/usr/local/lib/libfsutil.so.<MAJOR>`
+- `/usr/local/lib/libfsutil.so`
+- `/usr/local/lib/libfsutil.a`
+- `/usr/local/lib/pkgconfig/fsutil.pc`
+
+The package includes `postinst` and `postrm` hooks that run `ldconfig`.
 
 ## GitHub Pipeline
 
