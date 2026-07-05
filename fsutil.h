@@ -293,6 +293,43 @@ void fs_dir_close(fs_dir_t* dir);
 int fs_component_is_valid(const char* name);
 
 /**
+ * @brief Open an absolute directory path as a capability root.
+ *
+ * The absolute-path sibling of fs_dir_open_cwd(): the intended bootstrap for
+ * security-sensitive code whose root lives at a fixed absolute location (for
+ * example a service data directory such as /srv/app/data). After this call the
+ * rest of the work is done with dirfds and the single-component *at helpers.
+ *
+ * @param abs_path Absolute directory path. Must begin with '/'.
+ * @param expect Expected metadata. If null, only "is a directory" is checked.
+ * @param out_dir Receives the opened directory capability.
+ * @return 0 on success, negative errno on failure.
+ *
+ * Path rules:
+ * - `abs_path` must be absolute (leading '/').
+ * - The final component is opened with O_NOFOLLOW: a symlink at the final
+ *   component is rejected. Intermediate components are resolved normally, so
+ *   callers are expected to own or trust the parent chain (typically it is
+ *   provisioned once with known ownership/mode).
+ *
+ * Contract:
+ * - `out_dir` must already be initialized and closed exactly
+ *   (`out_dir->fd == -1`).
+ *
+ * Ownership:
+ * - on success, ownership of the opened fd is transferred to `out_dir`.
+ * - caller must later call fs_dir_close().
+ *
+ * Failure cases:
+ * - -EINVAL if `out_dir` is null, `abs_path` is null/empty, or not absolute.
+ * - -EBUSY if `out_dir` already owns an fd.
+ * - -ELOOP if the final component is a symlink and the kernel reports it.
+ * - -ENOTDIR / -EACCES if verification fails.
+ * - other negative errno from open(), fcntl(), or fstat().
+ */
+int fs_dir_open_abs(const char* abs_path, const fs_expect_t* expect, fs_dir_t* out_dir);
+
+/**
  * @brief Open the current working directory as a capability root.
  *
  * This is the intended bootstrap for security-sensitive code that wants to do
