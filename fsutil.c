@@ -202,6 +202,34 @@ int fs_dir_open_cwd(fs_dir_t* out_dir)
     return 0;
 }
 
+int fs_dir_open_abs(const char* abs_path, const fs_expect_t* expect, fs_dir_t* out_dir)
+{
+    /* Check input. */
+    if(!out_dir) return -EINVAL;
+    if(STRING_IS_NULL_OR_EMPTY(abs_path)) return -EINVAL;
+    if(abs_path[0] != '/') return -EINVAL;
+    if(out_dir->fd != -1) return -EBUSY;
+
+    /* Bootstrap a capability from an absolute directory root. O_NOFOLLOW
+     * rejects a symlink at the final component; the trusted parent chain is
+     * resolved normally. */
+    int fd = open(abs_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if(fd < 0) return -errno;
+
+    /* Apply the same verification the *at helpers apply after open. */
+    fs_dir_t opened = {.fd = fd};
+    int      rc     = fs_dir_verify(&opened, expect);
+    if(rc != 0)
+    {
+        close(fd);
+        return rc;
+    }
+
+    /* Transfer ownership of the opened fd to the output handle. */
+    out_dir->fd = fd;
+    return 0;
+}
+
 int fs_dir_verify(const fs_dir_t* dir, const fs_expect_t* expect)
 {
     /* Check input. */
