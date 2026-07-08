@@ -178,6 +178,15 @@ _print_array() {
     printf '\n'
 }
 
+#
+# Keep ThreadSanitizer available for explicit concurrency work, but exclude it
+# from the default automated lineup. TSAN frequently misbehaves on this host
+# (e.g. "unexpected memory mapping") and its output is rarely actionable here,
+# so the normal build/test/pipeline scripts must not pull it in by default.
+# Set GCC_BUILD_ENABLE_TSAN=1 to append tsan back for a deliberate run.
+#
+GCC_BUILD_ENABLE_TSAN="${GCC_BUILD_ENABLE_TSAN:-0}"
+
 GCC_BUILD_PROFILES=(
   debug
   audit
@@ -185,8 +194,11 @@ GCC_BUILD_PROFILES=(
   release
   native
   extreme
-  tsan
 )
+
+if [[ "${GCC_BUILD_ENABLE_TSAN}" == "1" ]]; then
+    GCC_BUILD_PROFILES+=(tsan)
+fi
 
 # =============================================================================
 # MARK: Language And Platform Policy
