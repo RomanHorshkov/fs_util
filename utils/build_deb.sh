@@ -37,6 +37,13 @@ if [[ -z "${VERSION}" ]]; then
     exit 1
 fi
 
+# The deb filename, soname chain, and control file all embed VERSION verbatim.
+# Refuse anything that is not strict MAJOR.MINOR.PATCH.
+if ! [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    printf 'error: VERSION must match MAJOR.MINOR.PATCH (digits only), got: %q\n' "${VERSION}" >&2
+    exit 1
+fi
+
 printf '[deb] building fsutil profile: %s\n' "${PROFILE}"
 "${ROOT_DIR}/utils/build_libs.sh" "${PROFILE}"
 
@@ -116,8 +123,17 @@ find "${STAGE_DIR}" -type f -name '*.h' -exec chmod 0644 {} +
 find "${STAGE_DIR}" -type f -name '*.a' -exec chmod 0644 {} +
 find "${STAGE_DIR}" -type f -name '*.pc' -exec chmod 0644 {} +
 
+# Verify the staged (stripped) payload still carries the release hardening
+# before it gets sealed into a package. A red check kills the build here.
+"${ROOT_DIR}/utils/check_hardening.sh" \
+    "${STAGE_DIR}/usr/local/lib/libfsutil.so.${VERSION}"
+
 mkdir -p "${OUT_DIR}"
 dpkg-deb --build --root-owner-group "${STAGE_DIR}" "${OUT_DEB}"
+
+# Refresh checksums next to the deb(s) so consumers can verify what they fetch.
+(cd "${OUT_DIR}" && sha256sum -- *.deb > SHA256SUMS)
+printf '[deb] checksums refreshed: %s\n' "${OUT_DIR}/SHA256SUMS"
 
 printf '\nBuilt complete\n'
 printf '  package: %s\n' "${OUT_DEB}"

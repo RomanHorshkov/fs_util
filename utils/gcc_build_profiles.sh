@@ -958,6 +958,33 @@ CFLAGS_HARDENING_FLAGS=(
   #   Security value: good.
   -fstack-clash-protection
 
+  # -fcf-protection=full
+  #   x86-64 Control-flow Enforcement Technology (CET): indirect-branch
+  #   tracking (endbr64 landing pads) + shadow-stack support for returns.
+  #
+  #   On CPUs without CET the landing pads execute as NOPs: tiny code-size
+  #   cost, no measurable time cost. On CET-capable CPUs (Intel 11th gen+,
+  #   AMD Zen 3+) control-flow hijacks hit a hardware fault.
+  #   Every Ubuntu distro package is built with this; our code should not be
+  #   the least-protected code in the process.
+  #
+  #   Portability: x86-64 GCC/Linux. Remove for other architectures.
+  -fcf-protection=full
+
+  # Deliberately NOT enabled (measured decisions, revisit with benchmarks):
+  #
+  # -ftrivial-auto-var-init=zero
+  #   Zero-fills locals the code does not initialize — stops stack info
+  #   leaks, but pays a real memset cost in hot paths. This codebase
+  #   initializes and bounds-checks aggressively, so the marginal value is
+  #   low. Adopt only if tests/stress shows the cost is under the noise
+  #   floor.
+  #
+  # -fno-plt
+  #   With -z now everywhere, PLT indirection is pure overhead and this
+  #   turns cross-.so calls into direct GOT loads. Likely a small WIN, not a
+  #   cost — benchmark before adopting so the claim is proven, not assumed.
+
   # -fno-common
   #   Make tentative global definitions behave strictly.
   #
@@ -971,14 +998,22 @@ CFLAGS_HARDENING_FLAGS=(
 LDFLAGS_EXE_HARDENING=(
   # -pie
   #   Link a position-independent executable. Use for executable release
-  #   profiles, not shared-library links.
+  #   profiles, not shared-library links (see LDFLAGS_SHARED warning).
   -pie
 
   # -Wl,-z,relro / -Wl,-z,now
   #   Ask the linker for RELRO and immediate binding. This hardens executable
   #   relocation tables at the cost of resolving symbols at startup.
+  #   For a long-running server the startup cost is paid exactly once.
   -Wl,-z,relro
   -Wl,-z,now
+
+  # -Wl,-z,noexecstack
+  #   Assert a non-executable stack for the final executable. Nearly always
+  #   already true (every object carries .note.GNU-stack), but explicit means
+  #   a stray asm object cannot silently regress it. glibc 2.41+ refuses
+  #   executable stacks outright — this just front-runs the platform.
+  -Wl,-z,noexecstack
 )
 
 CFLAGS_SHARED=(
@@ -991,7 +1026,41 @@ CFLAGS_SHARED=(
 LDFLAGS_SHARED=(
   # -shared
   #   Link a shared library. Keep this separate from executable -pie policy.
+  #
+  #   IMPORTANT: never pass LDFLAGS_RELEASE/LDFLAGS_NATIVE (which contain -pie)
+  #   into a shared-library link. `gcc -shared ... -pie` makes the driver link
+  #   an executable image (it pulls Scrt1.o and demands main) — the .so link
+  #   FAILS. Shared links take THIS array; executable links take the profile
+  #   LDFLAGS. Verified on GCC 13 / binutils 2.42.
   -shared
+
+  # -Wl,-z,relro / -Wl,-z,now
+  #   Full RELRO for the shared library itself: after the dynamic linker
+  #   resolves everything at load time, the .so's GOT/PLT pages are remapped
+  #   read-only. Without this, a write primitive anywhere in the process can
+  #   redirect the library's own outgoing calls.
+  #
+  #   Cost: symbol resolution happens at load instead of first call — a
+  #   one-time startup cost, irrelevant for long-running services.
+  -Wl,-z,relro
+  -Wl,-z,now
+
+  # -Wl,-z,noexecstack
+  #   Assert that nothing in this library requires an executable stack. One
+  #   stray object (hand-written asm without a .note.GNU-stack section) would
+  #   otherwise silently flip the WHOLE process stack to executable.
+  -Wl,-z,noexecstack
+
+  # -Wl,-z,defs
+  #   Refuse to produce a .so with undefined symbols. An underlinked library
+  #   fails HERE, loudly, at build time — not at load time on the target box.
+  #   (House doctrine: fail fast, fail loud.)
+  -Wl,-z,defs
+
+  # -Wl,--as-needed
+  #   Only record DT_NEEDED entries for libraries that actually satisfy a
+  #   symbol reference. Keeps the dependency surface honest.
+  -Wl,--as-needed
 )
 
 # =============================================================================
@@ -1059,6 +1128,20 @@ CFLAGS_OPT_RELEASE=(
   #         than debug or sanitizer builds.
   -O2
 )
+
+# Optional release ISA baseline (build-on-target deployments).
+# ------------------------------------------------------------
+# This platform builds its debs ON the machine that runs them, so the
+# portable-binary constraint is a choice, not a necessity. Export
+#
+#   GCC_BUILD_MARCH=x86-64-v3      (or: native, x86-64-v2, ...)
+#
+# to give the release profile a CPU baseline and buy back the hardening cost
+# with interest. Default is unset = fully portable release. Never bake
+# -march=native into a deb that could migrate to another box.
+if [[ -n "${GCC_BUILD_MARCH:-}" ]]; then
+    CFLAGS_OPT_RELEASE+=("-march=${GCC_BUILD_MARCH}")
+fi
 
 CFLAGS_OPT_NATIVE=(
   # -O3
@@ -1287,7 +1370,15 @@ LDFLAGS_AUDIT=()
 #
 CPPFLAGS_SANITIZE=(
   "${CPPFLAGS_BASE[@]}"
-  "${CPPFLAGS_HARDENING[@]}"
+
+  # -U_FORTIFY_SOURCE — and deliberately NO -D_FORTIFY_SOURCE here.
+  #
+  #   _FORTIFY_SOURCE and AddressSanitizer conflict: fortified calls are
+  #   routed to glibc __*_chk variants that BYPASS ASan's interceptors, so
+  #   the exact overflows this profile exists to catch can be masked (or
+  #   double-reported). The sanitizer owns memory checking in this profile;
+  #   fortify hardening belongs to audit/release/native.
+  -U_FORTIFY_SOURCE
 )
 
 CFLAGS_SANITIZE=(
@@ -1605,13 +1696,19 @@ LDFLAGS_TSAN=(
 #   Do not enable -Werror in this file by default; doing so makes compiler
 #   upgrades and third-party headers unnecessarily painful.
 #
-# Executable linker hardening:
-#   release and native include PIE / RELRO / NOW for executable builds:
-#       -fPIE
-#       -pie
-#       -Wl,-z,relro
-#       -Wl,-z,now
-#   Shared-library builds should use their own -fPIC / -shared policy instead.
+# Linker hardening — two distinct policies, never mixed:
+#   Executables (release/native LDFLAGS):
+#       -fPIE (compile) + -pie -Wl,-z,relro,-z,now,-z,noexecstack (link)
+#   Shared libraries (ALWAYS link with LDFLAGS_SHARED, never profile LDFLAGS):
+#       -fPIC (compile) + -shared -Wl,-z,relro,-z,now,-z,noexecstack,-z,defs,
+#       --as-needed (link)
+#   Passing profile LDFLAGS (-pie) into a -shared link BREAKS the link — see
+#   the LDFLAGS_SHARED comment.
+#
+# Artifact verification:
+#   check_hardening.sh (same directory) asserts the resulting ELFs actually
+#   carry PIE / full RELRO / non-exec stack / canaries. Build scripts run it
+#   on release-profile artifacts; a red check fails the build.
 #
 # =============================================================================
 # MARK: CLI
@@ -1632,7 +1729,8 @@ Available profiles:
 
   sanitize
       Runtime bug-hunting profile: strong warnings, ASan + UBSan + LSan, debug
-      information, and hardening.
+      information, and hardening (minus _FORTIFY_SOURCE, which conflicts with
+      ASan's interceptors).
 
   release
       Portable production profile: -O2, -DNDEBUG, strong warnings, and

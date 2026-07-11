@@ -179,6 +179,30 @@ profile_is_known() {
     return 1
 }
 
+# Verify that the artifacts of hardened production profiles actually carry the
+# hardening the catalog promises (full RELRO, non-executable stack, no
+# TEXTREL, ...). Flags drift silently; this turns drift into a loud red build.
+#
+# Only release and native are gated: debug/sanitize deliberately trade
+# hardening for debuggability, and extreme removes hardening on purpose.
+verify_hardened_artifact() {
+    local label="$1"
+    local artifact="$2"
+    local check_script="${ROOT_DIR}/utils/check_hardening.sh"
+
+    case "${label}" in
+        release|native) ;;
+        *) return 0 ;;
+    esac
+
+    [[ -x "${check_script}" ]] \
+        || die "hardening verifier not found or not executable: ${check_script}"
+
+    printf '  verifying hardening:             %s\n' "${artifact}"
+    "${check_script}" "${artifact}" \
+        || die "hardening verification FAILED for ${label} artifact: ${artifact}"
+}
+
 # Create a static archive.
 #
 # The simple case is:
@@ -313,6 +337,8 @@ build_library_variant() {
 
     printf '  creating static library:         %s\n' "${static_library}"
     create_static_archive "${static_library}" "${static_object}"
+
+    verify_hardened_artifact "${label}" "${shared_library}"
 
     printf '  output summary:\n'
     print_artifact_report "${shared_library}"
