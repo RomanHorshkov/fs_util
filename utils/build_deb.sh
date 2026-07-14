@@ -93,7 +93,7 @@ Version: ${VERSION}
 Section: libs
 Priority: optional
 Architecture: ${ARCH}
-Maintainer: ${DEB_MAINTAINER:-Roman Horshkov <roman.horshkov@gmail.com>}
+Maintainer: ${DEB_MAINTAINER:-Roman Horshkov <124358264+RomanHorshkov@users.noreply.github.com>}
 Depends: libc6
 Description: fsutil capability-oriented filesystem helper library
  fsutil is a C helper library for dirfd-based filesystem operations, strict
