@@ -607,6 +607,48 @@ int fs_file_open_read_at(const fs_dir_t* parent, const char* name, const fs_expe
     return 0;
 }
 
+int fs_file_open_rw_at(const fs_dir_t* parent, const char* name, const fs_expect_t* expect, int* out_fd)
+{
+    /* Read-WRITE reopen of an EXISTING regular file under a directory capability. Identical safety to
+     * fs_file_open_read_at() (O_NOFOLLOW, NONBLOCK-then-clear, fs_file_verify) but O_RDWR so the caller
+     * may seek + append (resumable upload spool). Never creates: the file must already exist. */
+    if(!out_fd) return -EINVAL;
+    *out_fd = -1;
+
+    if(!parent || parent->fd < 0) return -EINVAL;
+    if(!fs_component_is_valid(name)) return -EINVAL;
+
+    int rc = fs_dir_verify(parent, NULL);
+    if(rc != 0) return rc;
+
+    int fd = openat(parent->fd, name, O_RDWR | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY);
+    if(fd < 0) return -errno;
+
+    rc = fs_file_verify(fd, expect);
+    if(rc != 0)
+    {
+        close(fd);
+        return rc;
+    }
+
+    int status_flags = fcntl(fd, F_GETFL);
+    if(status_flags < 0)
+    {
+        int saved_errno = errno;
+        close(fd);
+        return -saved_errno;
+    }
+    if((status_flags & O_NONBLOCK) != 0 && fcntl(fd, F_SETFL, status_flags & ~O_NONBLOCK) != 0)
+    {
+        int saved_errno = errno;
+        close(fd);
+        return -saved_errno;
+    }
+
+    *out_fd = fd;
+    return 0;
+}
+
 int fs_file_create_write_new_at(const fs_dir_t* parent, const char* name, mode_t create_mode, const fs_expect_t* expect, int* out_fd)
 {
     /* Check output pointer first so raw-fd ownership is reset whenever possible. */
