@@ -616,6 +616,17 @@ int fs_dir_walk_create(const fs_dir_t* start, const char* relative_path, mode_t 
 int fs_file_open_read_at(const fs_dir_t* parent, const char* name, const fs_expect_t* expect, int* out_fd);
 
 /**
+ * Open an EXISTING regular file for READ-WRITE under a directory capability.
+ *
+ * Identical safety and semantics to fs_file_open_read_at() (O_NOFOLLOW, the
+ * NONBLOCK-then-restore acquisition, fs_file_verify()), but the returned fd is
+ * O_RDWR so the caller may lseek() and write() — the resumable upload spool
+ * appends at the persisted offset across separate requests. NEVER creates: the
+ * named file must already exist (returns -ENOENT via -errno otherwise).
+ */
+int fs_file_open_rw_at(const fs_dir_t* parent, const char* name, const fs_expect_t* expect, int* out_fd);
+
+/**
  * @brief Create a brand new regular file for writing under a parent dir.
  *
  * @param parent Parent directory capability.
