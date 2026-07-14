@@ -1,10 +1,8 @@
 # fsutil
 
-Small POSIX/Linux filesystem helper built around directory file descriptors as
-capabilities.
+Small POSIX/Linux filesystem helper built around directory file descriptors as capabilities.
 
-It avoids string-built absolute paths. Open a trusted directory once, then
-operate relative to it with `*at()`-style helpers.
+It avoids string-built absolute paths. Open a trusted directory once, then operate relative to it with `*at()`-style helpers.
 
 ## Goals
 
@@ -70,8 +68,7 @@ Artifacts:
 
 The integration suite uses `cmocka`.
 
-If you want the whole thing automated in CI, the pipeline is the GitHub Actions
-workflow:
+If you want the whole thing automated in CI, the pipeline is the GitHub Actions workflow:
 
 ```text
 .github/workflows/integration-pipeline.yml
@@ -167,8 +164,7 @@ Coverage outputs, when coverage artifacts are present:
 
 Coverage note:
 
-- coverage reports are generated only if a coverage-instrumented library build
-  exists and the tests were run against it
+- coverage reports are generated only if a coverage-instrumented library build exists and the tests were run against it
 - `build_libs.sh` can build `release_cov` when `gcov` and `gcovr` are available
 - the HTML index links to coverage automatically when those reports exist
 
@@ -221,26 +217,19 @@ The CI pipeline is intentionally simple:
 Browser story:
 
 - the artifact contains `tests/results/ITs/index.html` as the HTML entrypoint
-- the workflow also keeps `tests/results/ITs/latest/index.html` for the latest
-  archived run inside that artifact
-- the GitHub Actions run page gets a Markdown job summary, because the run UI
-  can display Markdown summaries but does not render the generated HTML pages
-  inline
+- the workflow also keeps `tests/results/ITs/latest/index.html` for the latest archived run inside that artifact
+- the GitHub Actions run page gets a Markdown job summary, because the run UI can display Markdown summaries but does not render the generated HTML pages inline
 
 ## API notes
 
 - single-component helpers accept exactly one component: no `/`, no `.`, no `..`
 - walk helpers accept relative paths only
 - symlinks are rejected during capability acquisition
-- durability stays explicit: create, rename, and unlink helpers do not fsync
-  parent directories implicitly
+- durability stays explicit: create, rename, and unlink helpers do not fsync parent directories implicitly
 
 ## Build profiles & hardening
 
-Builds go through `utils/build_libs.sh [profile ...]`, driven by the shared
-catalog `utils/gcc_build_profiles.sh` (synced verbatim from
-`Utils/compilation/`, never edited locally); artifacts land in
-`build/<profile>/`; `utils/check_hardening.sh` gates every release artifact.
+Builds go through `utils/build_libs.sh [profile ...]`, driven by the shared catalog `utils/gcc_build_profiles.sh` (synced verbatim from `Utils/compilation/`, never edited locally); artifacts land in `build/<profile>/`; `utils/check_hardening.sh` gates every release artifact.
 
 | Profile | Optimization | Warnings | Instrumentation | Hardened | Use it for |
 |---|---|---|---|---|---|
