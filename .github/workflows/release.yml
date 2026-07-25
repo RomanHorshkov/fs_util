@@ -1,0 +1,86 @@
+name: Release
+
+# Fires on a v* tag push (created automatically by auto-tag-release.yml on every master push, or
+# manually). Runs the full pipeline (build + test + package across every profile) as the gate,
+# then publishes the resulting .deb + checksums as a GitHub Release. No separate reusable
+# quality-gate workflow_call here (unlike EMlog/uuid7/SPSCring/MPSCring's design) — this repo has
+# no pre-existing reusable quality.yml, and run_pipeline.sh already IS the full build+test+package
+# gate, so this workflow just runs it directly.
+#
+# No build-provenance attestation: actions/attest-build-provenance is unavailable for user-owned
+# private repositories and hard-fails the job rather than degrading gracefully (same wall
+# EMlog/MPSCring/SPSCring's own release.yml already documents).
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish:
+    name: Build, test, package, publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Read version
+        id: version
+        run: echo "value=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Verify tag matches VERSION
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          EXPECTED_TAG="v${{ steps.version.outputs.value }}"
+          ACTUAL_TAG="${GITHUB_REF_NAME}"
+          if [ "$ACTUAL_TAG" != "$EXPECTED_TAG" ]; then
+            echo "Tag/version mismatch: expected $EXPECTED_TAG but got $ACTUAL_TAG"
+            exit 1
+          fi
+
+      - name: Install dependencies
+        env: { DEBIAN_FRONTEND: noninteractive }
+        run: |
+          sudo apt-get -yqq update
+          sudo apt-get -yqq install build-essential pkg-config fakeroot libcmocka-dev
+
+      - name: Run full pipeline (build + test + package)
+        run: ./utils/run_pipeline.sh
+
+      - name: Checksums
+        run: |
+          cd build/debs
+          sha256sum *.deb > SHA256SUMS
+
+      - name: Upload workflow artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-assets
+          if-no-files-found: error
+          path: |
+            build/debs/*.deb
+            build/debs/SHA256SUMS
+
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            build/debs/*.deb \
+            build/debs/SHA256SUMS \
+            --generate-notes \
+            --title "fs_util ${GITHUB_REF_NAME}"
