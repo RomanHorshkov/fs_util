@@ -621,7 +621,7 @@ done
 
 # Coverage is optional.
 #
-# The old all-in-one script always rebuilt fsutil.c with --coverage, so reports
+# The old all-in-one script always rebuilt app/fsutil.c with --coverage, so reports
 # were guaranteed. The new workflow instead links tests against prebuilt
 # libraries. Coverage reports therefore exist only when a coverage-instrumented
 # library variant such as release_cov was built and exercised.

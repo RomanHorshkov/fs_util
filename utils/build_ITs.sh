@@ -146,7 +146,7 @@ CFLAGS=(
   -O0
   -g
   --coverage
-  -I.
+  -Iapp
   -Itests/ITs
   "${WARN_FLAGS[@]}"
 )

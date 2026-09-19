@@ -62,8 +62,8 @@ mkdir -p "${STAGE_DIR}/DEBIAN" \
          "${STAGE_DIR}/usr/local/lib" \
          "${STAGE_DIR}/usr/local/lib/pkgconfig"
 
-install -m 0644 "${ROOT_DIR}/fsutil.h" "${STAGE_DIR}/usr/local/include/fsutil.h"
-install -m 0644 "${ROOT_DIR}/fsutil.h" "${STAGE_DIR}/usr/local/include/utils/fsutil.h"
+install -m 0644 "${ROOT_DIR}/app/fsutil.h" "${STAGE_DIR}/usr/local/include/fsutil.h"
+install -m 0644 "${ROOT_DIR}/app/fsutil.h" "${STAGE_DIR}/usr/local/include/utils/fsutil.h"
 
 install -m 0755 "${SHARED_LIB}" "${STAGE_DIR}/usr/local/lib/libfsutil.so.${VERSION}"
 if command -v "${STRIP_BIN}" >/dev/null 2>&1; then
@@ -128,6 +128,13 @@ find "${STAGE_DIR}" -type f -name '*.pc' -exec chmod 0644 {} +
 "${ROOT_DIR}/utils/check_hardening.sh" \
     "${STAGE_DIR}/usr/local/lib/libfsutil.so.${VERSION}"
 
+# Ship the DEP-5 copyright file (first-party terms + every third-party notice)
+# at /usr/share/doc/<pkg>/copyright (Debian Policy 12.5). A missing file is a
+# build error: a binary must never leave without its notices.
+COPYRIGHT_SRC="${ROOT_DIR}/debian/copyright"
+[[ -f "${COPYRIGHT_SRC}" ]] || { printf 'missing %s — third-party notices must ship in the deb\n' "${COPYRIGHT_SRC}" >&2; exit 1; }
+install -d -m 0755 "${STAGE_DIR}/usr/share" "${STAGE_DIR}/usr/share/doc" "${STAGE_DIR}/usr/share/doc/${PACKAGE_NAME}"
+install -m 0644 "${COPYRIGHT_SRC}" "${STAGE_DIR}/usr/share/doc/${PACKAGE_NAME}/copyright"
 mkdir -p "${OUT_DIR}"
 dpkg-deb --build --root-owner-group "${STAGE_DIR}" "${OUT_DEB}"
 

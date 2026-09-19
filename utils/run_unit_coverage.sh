@@ -58,21 +58,21 @@ coverage_xml="${RESULT_ROOT}/coverage.xml"
 
 gcovr \
     --root "${ROOT_DIR}" \
-    --filter "${ROOT_DIR}/fsutil.c" \
+    --filter "${ROOT_DIR}/app/fsutil.c" \
     --object-directory "${ROOT_DIR}/build/${PROFILE}" \
     "${ROOT_DIR}/build/${PROFILE}" \
     --txt > "${coverage_txt}"
 
 gcovr \
     --root "${ROOT_DIR}" \
-    --filter "${ROOT_DIR}/fsutil.c" \
+    --filter "${ROOT_DIR}/app/fsutil.c" \
     --object-directory "${ROOT_DIR}/build/${PROFILE}" \
     "${ROOT_DIR}/build/${PROFILE}" \
     --html-details "${coverage_html}" >/dev/null
 
 gcovr \
     --root "${ROOT_DIR}" \
-    --filter "${ROOT_DIR}/fsutil.c" \
+    --filter "${ROOT_DIR}/app/fsutil.c" \
     --object-directory "${ROOT_DIR}/build/${PROFILE}" \
     "${ROOT_DIR}/build/${PROFILE}" \
     --xml "${coverage_xml}" >/dev/null

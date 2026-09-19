@@ -84,7 +84,7 @@ CFLAGS=(
   -O0
   -g
   --coverage
-  -I.
+  -Iapp
   -Itests/unit
   "${WARN_FLAGS[@]}"
 )

@@ -3,10 +3,10 @@
 # fsutil library builder
 # =============================================================================
 #
-# This script builds the fsutil library artifacts from fsutil.c.
+# This script builds the fsutil library artifacts from app/fsutil.c.
 #
 # It deliberately does one job only:
-#   - compile fsutil.c with the selected GCC profile flags;
+#   - compile app/fsutil.c with the selected GCC profile flags;
 #   - produce a static archive:  build/<profile>/libfsutil.a;
 #   - produce a shared library:  build/<profile>/libfsutil.so;
 #   - optionally produce a coverage-instrumented release variant:
@@ -317,14 +317,14 @@ build_library_variant() {
         "${cppflags[@]}" \
         "${library_cflags[@]}" \
         "${CFLAGS_SHARED[@]}" \
-        -c fsutil.c \
+        -c app/fsutil.c \
         -o "${shared_object}"
 
     printf '  compiling static-library object: %s\n' "${static_object}"
     "${CC}" \
         "${cppflags[@]}" \
         "${library_cflags[@]}" \
-        -c fsutil.c \
+        -c app/fsutil.c \
         -o "${static_object}"
 
     printf '  linking shared library:          %s\n' "${shared_library}"
@@ -434,7 +434,7 @@ BUILD_DIR="${ROOT_DIR}/build"
 cd -- "${ROOT_DIR}"
 
 [[ -f "${PROFILE_FILE}" ]] || die "gcc profile file not found: ${PROFILE_FILE}"
-[[ -f "fsutil.c" ]] || die "source file not found: ${ROOT_DIR}/fsutil.c"
+[[ -f "app/fsutil.c" ]] || die "source file not found: ${ROOT_DIR}/app/fsutil.c"
 
 require_tool "${CC}"
 require_tool "${AR}"
