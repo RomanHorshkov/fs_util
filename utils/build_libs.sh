@@ -320,16 +320,13 @@ build_library_variant() {
         -c app/fsutil.c \
         -o "${shared_object}"
 
-    printf '  compiling static-library object: %s\n' "${static_object}"
-    # -fPIC on the ARCHIVE object too: the .a must link into PIE executables and into
-    # consumers' shared objects on any toolchain, not only on one built with
-    # --enable-default-pie (Debian/Ubuntu gcc). Same code as the .so object.
-    "${CC}" \
-        "${cppflags[@]}" \
-        "${library_cflags[@]}" \
-        "${CFLAGS_SHARED[@]}" \
-        -c app/fsutil.c \
-        -o "${static_object}"
+    # ONE object feeds both artifacts. The archive object used to be a second, non-PIC compile; it is
+    # now byte-identical to the PIC object (same flags), so compiling it twice only doubled the work.
+    # -fPIC (not -fPIE) matters for anything a consumer may link into ITS OWN shared library: -fPIE
+    # resolves thread-local variables with the initial-exec model, valid only inside the main
+    # executable, so an archive built that way refuses to link into a .so ("recompile with -fPIC").
+    printf '  static-library object:           %s (same PIC object)\n' "${shared_object}"
+    static_object="${shared_object}"
 
     # Versioned SONAME (lib<x>.so.<MAJOR>): the deb installs this file as
     # libfsutil.so.<VERSION> with .so.<MAJOR> and .so symlinks, and consumers
