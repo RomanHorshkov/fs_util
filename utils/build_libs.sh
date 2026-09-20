@@ -321,19 +321,36 @@ build_library_variant() {
         -o "${shared_object}"
 
     printf '  compiling static-library object: %s\n' "${static_object}"
+    # -fPIC on the ARCHIVE object too: the .a must link into PIE executables and into
+    # consumers' shared objects on any toolchain, not only on one built with
+    # --enable-default-pie (Debian/Ubuntu gcc). Same code as the .so object.
     "${CC}" \
         "${cppflags[@]}" \
         "${library_cflags[@]}" \
+        "${CFLAGS_SHARED[@]}" \
         -c app/fsutil.c \
         -o "${static_object}"
 
-    printf '  linking shared library:          %s\n' "${shared_library}"
+    # Versioned SONAME (lib<x>.so.<MAJOR>): the deb installs this file as
+    # libfsutil.so.<VERSION> with .so.<MAJOR> and .so symlinks, and consumers
+    # must record the MAJOR name, not an ABI-less "libfsutil.so".
+    local fsutil_version fsutil_major
+    fsutil_version="$(tr -d '[:space:]' < "${ROOT_DIR}/VERSION")"
+    fsutil_major="${fsutil_version%%.*}"
+    printf '  linking shared library:          %s (soname libfsutil.so.%s)\n' "${shared_library}" "${fsutil_major}"
     "${CC}" \
         "${LDFLAGS_SHARED[@]}" \
         "${library_ldflags[@]}" \
+        -Wl,-soname,"libfsutil.so.${fsutil_major}" \
+        -Wl,--version-script,"${ROOT_DIR}/utils/fsutil.map" \
         -o "${shared_library}" \
         "${shared_object}" \
         "${SHARED_LINK_LIBS[@]}"
+
+    # The SONAME name must resolve next to the unversioned file, or the
+    # integration tests' .shared variant (LD_LIBRARY_PATH into this dir)
+    # cannot load the library the way a consumer on the box does.
+    ln -sfn "libfsutil.so" "${output_dir}/libfsutil.so.${fsutil_major}"
 
     printf '  creating static library:         %s\n' "${static_library}"
     create_static_archive "${static_library}" "${static_object}"
