@@ -74,9 +74,13 @@ jobs:
           BUNDLE_DIR="build/release-bundle"
           mkdir -p "${STAGE_DIR}/include" "${STAGE_DIR}/lib" "${BUNDLE_DIR}"
 
+          MAJOR="${VER%%.*}"
           cp app/fsutil.h "${STAGE_DIR}/include/"
           cp build/release/libfsutil.a "${STAGE_DIR}/lib/"
-          cp build/release/libfsutil.so."${VER}" "${STAGE_DIR}/lib/"
+          # build_libs.sh emits libfsutil.so (SONAME libfsutil.so.<MAJOR>) plus the soname
+          # symlink; the bundle carries the same layout the .deb installs.
+          cp -L build/release/libfsutil.so "${STAGE_DIR}/lib/libfsutil.so.${VER}"
+          ln -sf "libfsutil.so.${VER}" "${STAGE_DIR}/lib/libfsutil.so.${MAJOR}"
           ln -sf "libfsutil.so.${VER}" "${STAGE_DIR}/lib/libfsutil.so"
 
           tar -C "build/release-stage" -czf \
