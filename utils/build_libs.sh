@@ -309,6 +309,9 @@ build_library_variant() {
     filter_flags raw_ldflags LDFLAGS_EXE_HARDENING library_ldflags
 
     mkdir -p "${output_dir}"
+    # Stale objects from an earlier build layout (or a previous coverage run's .gcda) must
+    # not survive into this build: gcov refuses a .gcda whose .gcno no longer matches.
+    rm -f "${output_dir}"/*.o "${output_dir}"/*.gcno "${output_dir}"/*.gcda
 
     printf '\n[%s]\n' "${label}"
 

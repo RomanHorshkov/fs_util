@@ -626,8 +626,7 @@ done
 # libraries. Coverage reports therefore exist only when a coverage-instrumented
 # library variant such as release_cov was built and exercised.
 coverage_artifact_count="$(
-    find "${ROOT_DIR}/build" -type f \( -name '*.gcno' -o -name '*.gcda' \) \
-        ! -path "${ROOT_DIR}/build/ITs/*" \
+    find "${ROOT_DIR}/build/release_cov" -type f \( -name '*.gcno' -o -name '*.gcda' \) 2>/dev/null \
         | wc -l
 )"
 
@@ -638,21 +637,21 @@ if (( coverage_artifact_count > 0 )); then
         printf '\n[coverage] generating reports via gcovr...\n'
 
         gcovr -r "${ROOT_DIR}" \
-            --object-directory "${ROOT_DIR}/build" \
+            --object-directory "${ROOT_DIR}/build/release_cov" "${ROOT_DIR}/build/release_cov" \
             --exclude 'tests/' \
             --gcov-ignore-parse-errors negative_hits.warn_once_per_file \
             --html --html-details \
             -o "${RUN_RESULT_DIR}/ITs_all_coverage.html"
 
         gcovr -r "${ROOT_DIR}" \
-            --object-directory "${ROOT_DIR}/build" \
+            --object-directory "${ROOT_DIR}/build/release_cov" "${ROOT_DIR}/build/release_cov" \
             --exclude 'tests/' \
             --gcov-ignore-parse-errors negative_hits.warn_once_per_file \
             --xml \
             -o "${RUN_RESULT_DIR}/ITs_all_coverage.xml"
 
         gcovr -r "${ROOT_DIR}" \
-            --object-directory "${ROOT_DIR}/build" \
+            --object-directory "${ROOT_DIR}/build/release_cov" "${ROOT_DIR}/build/release_cov" \
             --exclude 'tests/' \
             --gcov-ignore-parse-errors negative_hits.warn_once_per_file \
             --json-summary \

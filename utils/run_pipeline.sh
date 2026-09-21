@@ -16,7 +16,7 @@ set -euo pipefail
 
 usage() {
     cat <<'EOF'
-usage: ./utils/run_pipeline.sh [all|build|build_ITs|run_ITs]
+usage: ./utils/run_pipeline.sh [all|build|unit_release|unit_cov|build_ITs|run_ITs|sanitizers|package]
 
 Default command:
   all
@@ -34,8 +34,12 @@ normalize_command() {
     case "${raw_command}" in
         all) printf 'all\n' ;;
         build) printf 'build\n' ;;
+        unit_release|unit-release) printf 'unit_release\n' ;;
+        unit_cov|unit-cov|unit) printf 'unit_cov\n' ;;
         build_ITs|build-its|build_its) printf 'build_ITs\n' ;;
         run_ITs|run-its|run_its) printf 'run_ITs\n' ;;
+        sanitizers|sanitizer) printf 'sanitizers\n' ;;
+        package|deb) printf 'package\n' ;;
         help|-h|--help) printf 'help\n' ;;
         *)
             printf 'unknown command: %s\n' "${raw_command}" >&2
@@ -62,6 +66,26 @@ run_stage_with_log() {
 run_build_stage() {
     run_stage_with_log build "${RUN_RESULT_DIR}/build_libs.log" \
         "${SCRIPT_DIR}/build_libs.sh"
+}
+
+run_unit_release_stage() {
+    run_stage_with_log unit_release "${RUN_RESULT_DIR}/unit_release.log" \
+        "${SCRIPT_DIR}/build_UTs_release.sh"
+}
+
+run_unit_cov_stage() {
+    run_stage_with_log unit_cov "${RUN_RESULT_DIR}/unit_cov.log" \
+        "${SCRIPT_DIR}/build_UTs.sh"
+}
+
+run_sanitizers_stage() {
+    run_stage_with_log sanitizers "${RUN_RESULT_DIR}/sanitizers.log" \
+        "${SCRIPT_DIR}/build_sanitizer_tests.sh"
+}
+
+run_package_stage() {
+    run_stage_with_log package "${RUN_RESULT_DIR}/package.log" \
+        "${SCRIPT_DIR}/build_deb.sh"
 }
 
 run_build_its_stage() {
@@ -102,11 +126,27 @@ export FSUTIL_RESULTS_RUN_ID="${RUN_ID}"
 case "${COMMAND}" in
     all)
         run_build_stage
+        run_unit_release_stage
+        run_unit_cov_stage
         run_build_its_stage
         run_run_its_stage
+        run_sanitizers_stage
+        run_package_stage
         ;;
     build)
         run_build_stage
+        ;;
+    unit_release)
+        run_unit_release_stage
+        ;;
+    unit_cov)
+        run_unit_cov_stage
+        ;;
+    sanitizers)
+        run_sanitizers_stage
+        ;;
+    package)
+        run_package_stage
         ;;
     build_ITs)
         run_build_its_stage
