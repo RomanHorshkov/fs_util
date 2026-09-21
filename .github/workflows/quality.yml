@@ -1,0 +1,198 @@
+name: Quality
+
+# Connected graph, not several independent workflows racing each other on every push:
+#
+#   format-check (independent gate)
+#   build
+#     +-- compiler-portability ---------------------------+
+#     +-- unit-tests-coverage (release UTs + 100% gate)   +--> package-smoke
+#     +-- integration (all profiles, static + shared) -> sanitizers
+#
+# Also invocable as a reusable workflow (workflow_call) so release.yml can require it to pass
+# before cutting a release, instead of re-implementing the same gate. Mirrors the architecture
+# shared by uuid7/EMlog/SPSCring/MPSCring's own quality.yml.
+
+on:
+  push:
+    # Every branch push and every tag push. A tag push is a release cut and fires Quality
+    # twice — once directly here, once nested inside release.yml's quality-gate via
+    # workflow_call. That is intended: the direct run is the visible per-tag record on this
+    # workflow's own page, the nested one is what gates the release. The two no longer
+    # cancel each other because the concurrency group below is keyed on the CALLING
+    # workflow's name, so they land in different groups.
+    branches:
+      - "**"
+    tags:
+      - "**"
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  # `github.workflow` is "Quality" for a direct run but resolves to the CALLER's name
+  # ("Release") inside a workflow_call invocation. Keying the group on it keeps a direct
+  # tag-push run and the release-nested run of the SAME ref in separate groups, so neither
+  # cancels the other, and neither collides with Release's own group
+  # ("Release-refs/tags/vX.Y.Z"), which would deadlock the parent against its gate.
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  format-check:
+    name: clang-format check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+      - name: Every source already canonical
+        run: CLANG_FORMAT=clang-format-18 ./utils/format.sh --check
+
+  build:
+    name: Build (all profiles)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config
+      - name: Build libraries
+        run: ./utils/build_libs.sh
+
+  compiler-portability:
+    name: Strict compile (${{ matrix.compiler }})
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install compilers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang
+      - name: Compile the library with strict diagnostics
+        run: |
+          ${{ matrix.compiler }} -std=c11 -O2 -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Werror \
+              -D_GNU_SOURCE -Iapp -c app/fsutil.c -o /tmp/fsutil-${{ matrix.compiler }}.o
+
+  unit-tests-coverage:
+    name: "Release UTs + 100% line/branch coverage gate"
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libcmocka-dev gcovr
+      - name: Contract UTs against the release archive
+        run: ./utils/build_UTs_release.sh
+      - name: Contract + fault-injection UTs with coverage gate
+        run: ./utils/build_UTs.sh
+      - name: Upload coverage artifacts (HTML/XML/JSON)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: uts-coverage
+          if-no-files-found: warn
+          path: tests/results/UTs
+
+  integration:
+    name: Integration tests (all profiles, static + shared)
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libcmocka-dev gcovr
+      - name: Build integration tests
+        run: ./utils/run_pipeline.sh build_ITs
+      - name: Run integration tests
+        run: ./utils/run_pipeline.sh run_ITs
+      - name: Upload integration pipeline report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: integration-report
+          if-no-files-found: warn
+          path: tests/results/ITs/runs/**
+
+  sanitizers:
+    name: ASan, UBSan, LSan (UTs + ITs)
+    needs: integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libcmocka-dev
+      - name: Build and run sanitized UTs and ITs
+        run: ./utils/build_sanitizer_tests.sh
+
+  package-smoke:
+    name: Package build + install + smoke test
+    needs: [format-check, compiler-portability, unit-tests-coverage, sanitizers]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config fakeroot
+      - name: Build .deb
+        run: ./utils/build_deb.sh
+      - name: Install the built .deb
+        run: |
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          ARCH="$(dpkg --print-architecture)"
+          DEB_FILE="build/debs/libfsutil_${VERSION}_${ARCH}.deb"
+          if [[ ! -f "${DEB_FILE}" ]]; then
+            echo "expected package not found: ${DEB_FILE}" >&2
+            ls -la build/debs >&2 || true
+            exit 1
+          fi
+          sudo apt-get install -y "./${DEB_FILE}"
+      - name: Smoke test the installed package
+        run: ./utils/smoke_test_package.sh
+      - name: Upload package artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: deb-package
+          if-no-files-found: error
+          path: |
+            build/debs/*.deb
+            build/debs/SHA256SUMS
