@@ -131,6 +131,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config libcmocka-dev gcovr
+      - name: Build libraries (fresh checkout — the ITs link against build/<profile>/)
+        run: ./utils/run_pipeline.sh build
       - name: Build integration tests
         run: ./utils/run_pipeline.sh build_ITs
       - name: Run integration tests
