@@ -1,5 +1,11 @@
 # fsutil
 
+[![Quality](https://github.com/RomanHorshkov/fs_util/actions/workflows/quality.yml/badge.svg?branch=master)](https://github.com/RomanHorshkov/fs_util/actions/workflows/quality.yml?query=branch%3Amaster)
+[![Security](https://github.com/RomanHorshkov/fs_util/actions/workflows/security.yml/badge.svg?branch=master)](https://github.com/RomanHorshkov/fs_util/actions/workflows/security.yml?query=branch%3Amaster)
+[![Release](https://github.com/RomanHorshkov/fs_util/actions/workflows/release.yml/badge.svg?branch=master)](https://github.com/RomanHorshkov/fs_util/actions/workflows/release.yml?query=branch%3Amaster)
+![Coverage](.github/badges/coverage.svg)
+[![License: MIT](https://img.shields.io/badge/license-MIT-informational)](./LICENSE)
+
 Small POSIX/Linux filesystem helper built around directory file descriptors as capabilities.
 
 It avoids string-built absolute paths. Open a trusted directory once, then operate relative to it with `*at()`-style helpers.
@@ -19,11 +25,11 @@ It avoids string-built absolute paths. Open a trusted directory once, then opera
 - `VERSION` - package/library version
 - `app/fsutil.h` - public API
 - `app/fsutil.c` - implementation
-- `utils/` - build, test, coverage, and packaging scripts
-- `tests/unit/` - cmocka unit tests
-- `tests/ITs/` - cmocka integration tests
-- `tests/results/unit/` - unit-test and coverage outputs
-- `tests/results/ITs/` - integration-test and coverage outputs
+- `utils/` - build, test, coverage, packaging, and formatting scripts
+- `tests/UTs/` - cmocka unit tests (contract tests + fault-injection tests through the private syscall seam `tests/UTs/fsutil_test_hooks.h`, the latter compiled only with `-DFS_UTIL_TESTING`)
+- `tests/ITs/` - cmocka integration tests, run against every build profile, static and shared
+- `tests/results/UTs/` - unit-test coverage outputs (HTML/XML/JSON, 100% line + branch gate)
+- `tests/results/ITs/` - integration-test runs and coverage outputs
 - `build/` - generated objects, libraries, test binaries, and `.deb` artifacts
 
 ## Platform
@@ -66,107 +72,19 @@ Artifacts:
 
 ## Testing
 
-The integration suite uses `cmocka`.
+Both suites use `cmocka`. Scripts under `utils/` follow the house naming shared with uuid7/EMlog/SPSCring/MPSCring:
 
-If you want the whole thing automated in CI, the pipeline is the GitHub Actions workflow:
-
-```text
-.github/workflows/integration-pipeline.yml
-```
-
-That workflow:
-
-1. runs `build`
-2. runs `build_ITs`
-3. runs `run_ITs`
-4. archives logs and coverage outputs into a run-specific result directory
-5. passes the workspace state between jobs with short-lived artifacts
-6. uploads the final result tree as a short-lived GitHub Actions artifact
-
-The workflow is intentionally split into stages:
-
-1. build the libraries
-2. build the test executables against the already-built libraries
-3. run whatever built test executables are present
-
-Requirements on Debian/Ubuntu:
-
-```sh
-sudo apt install libcmocka-dev
-```
-
-Optional coverage reports:
-
-```sh
-sudo apt install gcovr
-```
-
-Sequence:
+- `utils/build_UTs_release.sh` compiles `tests/UTs/*.c` at `-O2` and links them against `build/release/libfsutil.a`, the exact object code that gets packaged. The fault-injection tests are compiled out here, so this run proves the shipped library honours every documented contract.
+- `utils/build_UTs.sh` compiles `app/fsutil.c` once, instrumented, with `-DFS_UTIL_TESTING` (every kernel call goes through a replaceable function pointer), runs every unit-test executable against it, and gates on **100% line and 100% branch** coverage of `app/fsutil.c`. The fault-injection tests are what reach the cleanup paths a real filesystem never produces on demand: `fchmod()` failing on a file just created, `fstat()` failing on an open fd, `fcntl()` refusing `F_GETFL`, `fsync()` reporting `EIO`, a cleanup `unlinkat()` clobbering `errno`.
+- `utils/build_ITs.sh` + `utils/run_ITs.sh` build and run the integration suite for every profile in the catalog (`debug`, `audit`, `sanitize`, `release`, `native`, `extreme`, plus `release_cov`), static and shared, and archive an HTML report under `tests/results/ITs/runs/<run id>/`.
+- `utils/build_sanitizer_tests.sh` runs UTs and ITs under ASan, UBSan, and LSan with the seam enabled, so an fd leaked on an injected error path is caught.
+- `utils/run_pipeline.sh` runs the whole board: `build`, `unit_release`, `unit_cov`, `build_ITs`, `run_ITs`, `sanitizers`, `package`. Each stage is also invocable on its own.
 
 ```sh
 ./utils/run_pipeline.sh
 ```
 
-Build unit-test executables:
-
-```sh
-./utils/build_unit_tests.sh
-```
-
-Run discovered unit-test executables:
-
-```sh
-./utils/run_unit_tests.sh
-```
-
-Run unit tests and emit a gcovr coverage report:
-
-```sh
-./utils/run_unit_coverage.sh
-```
-
-Build test executables:
-
-```sh
-./utils/build_ITs.sh
-```
-
-Run discovered test executables:
-
-```sh
-./utils/run_ITs.sh
-```
-
-Pipeline stages, if you want the CI-style split locally:
-
-```sh
-./utils/run_pipeline.sh build
-./utils/run_pipeline.sh build_ITs
-./utils/run_pipeline.sh run_ITs
-```
-
-Outputs:
-
-- latest overview page: `tests/results/ITs/index.html`
-- latest run page: `tests/results/ITs/latest/index.html`
-- archived run root: `tests/results/ITs/runs/<run-id>/`
-- latest text summary: `tests/results/ITs/integration_result.txt`
-- per-run text logs: `tests/results/ITs/runs/<run-id>/<profile>/integration_test.shared.txt`
-- per-run text logs: `tests/results/ITs/runs/<run-id>/<profile>/integration_test.static.txt`
-- per-run HTML logs: `tests/results/ITs/runs/<run-id>/<profile>/integration_test.shared.html`
-- per-run HTML logs: `tests/results/ITs/runs/<run-id>/<profile>/integration_test.static.html`
-
-Coverage outputs, when coverage artifacts are present:
-
-- `tests/results/ITs/runs/<run-id>/ITs_all_coverage.html`
-- `tests/results/ITs/runs/<run-id>/ITs_all_coverage.xml`
-- `tests/results/ITs/runs/<run-id>/coverage-summary.json`
-
-Coverage note:
-
-- coverage reports are generated only if a coverage-instrumented library build exists and the tests were run against it
-- `build_libs.sh` can build `release_cov` when `gcov` and `gcovr` are available
-- the HTML index links to coverage automatically when those reports exist
+Symlink rejection note: a symlink where a directory is required is refused by `openat(O_DIRECTORY|O_NOFOLLOW)`; current kernels report that as `-ENOTDIR`, older ones as `-ELOOP`. The tests accept both because the property under test is "never followed". File helpers use `O_NOFOLLOW` alone and report `-ELOOP`.
 
 ## Packaging
 
@@ -177,10 +95,6 @@ Build the Debian package:
 ```
 
 Compatibility wrapper:
-
-```sh
-./utils/make_deb.sh
-```
 
 Artifact:
 
@@ -200,31 +114,19 @@ The package includes `postinst` and `postrm` hooks that run `ldconfig`.
 
 ## GitHub Pipeline
 
-Pipeline file:
+Four workflows, the same connected graph every sibling library uses:
 
-- `.github/workflows/integration-pipeline.yml`
-
-The CI pipeline is intentionally simple:
-
-1. checkout
-2. run `./utils/run_pipeline.sh build`
-3. pass `build/` plus the archived run directory to the next job
-4. run `./utils/run_pipeline.sh build_ITs`
-5. pass the updated workspace state to the final job
-6. run `./utils/run_pipeline.sh run_ITs`
-7. upload `tests/results/ITs/` as a short-lived results artifact
-
-Browser story:
-
-- the artifact contains `tests/results/ITs/index.html` as the HTML entrypoint
-- the workflow also keeps `tests/results/ITs/latest/index.html` for the latest archived run inside that artifact
-- the GitHub Actions run page gets a Markdown job summary, because the run UI can display Markdown summaries but does not render the generated HTML pages inline
+- `.github/workflows/quality.yml` - `build` → `compiler-portability` (gcc + clang, `-Werror`), `unit-tests-coverage` (release UTs + 100% gate), `integration` (all profiles) → `sanitizers` → `package-smoke` (build the `.deb`, install it, compile and run a program against ONLY the installed package). Runs on every branch push, every tag push, and every pull request; also invocable via `workflow_call`.
+- `.github/workflows/security.yml` - CodeQL and GCC's `-fanalyzer` on master/`safety_upgrades` pushes, tags, pull requests, and weekly.
+- `.github/workflows/release.yml` - on a `v*.*.*` tag: the full Quality gate, then the release bundle (tarball with header + libraries, the `.deb`, `SHA256SUMS`) published as a GitHub Release. The tag must equal `VERSION`.
+- `.github/workflows/coverage-badge.yml` - after a successful Quality run on master, refreshes `.github/badges/coverage.svg` from the unit-test coverage summary.
 
 ## API notes
 
 - single-component helpers accept exactly one component: no `/`, no `.`, no `..`
 - walk helpers accept relative paths only
-- symlinks are rejected during capability acquisition
+- symlinks are rejected during capability acquisition; `fs_dir_open_abs_nofollow()` extends that to every component of an absolute path (start from `/`, walk with `O_NOFOLLOW`, refuse `..`)
+- `fs_rename_noreplace_at()` renames without ever replacing an existing destination, in one kernel call (`renameat2` + `RENAME_NOREPLACE`): no probe-then-rename window
 - durability stays explicit: create, rename, and unlink helpers do not fsync parent directories implicitly
 
 ## Build profiles & hardening
