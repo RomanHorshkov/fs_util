@@ -17,8 +17,8 @@ It avoids string-built absolute paths. Open a trusted directory once, then opera
 ## Layout
 
 - `VERSION` - package/library version
-- `fsutil.h` - public API
-- `fsutil.c` - implementation
+- `app/fsutil.h` - public API
+- `app/fsutil.c` - implementation
 - `utils/` - build, test, coverage, and packaging scripts
 - `tests/unit/` - cmocka unit tests
 - `tests/ITs/` - cmocka integration tests
