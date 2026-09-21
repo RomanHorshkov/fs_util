@@ -136,6 +136,9 @@ COPYRIGHT_SRC="${ROOT_DIR}/debian/copyright"
 install -d -m 0755 "${STAGE_DIR}/usr/share" "${STAGE_DIR}/usr/share/doc" "${STAGE_DIR}/usr/share/doc/${PACKAGE_NAME}"
 install -m 0644 "${COPYRIGHT_SRC}" "${STAGE_DIR}/usr/share/doc/${PACKAGE_NAME}/copyright"
 mkdir -p "${OUT_DIR}"
+# Keep build/debs single-valued: a stale package from an older VERSION must never ride
+# along into SHA256SUMS or a release bundle assembled from this directory.
+rm -f "${OUT_DIR}/${PACKAGE_NAME}_"*.deb "${OUT_DIR}/SHA256SUMS"
 dpkg-deb --build --root-owner-group "${STAGE_DIR}" "${OUT_DEB}"
 
 # Refresh checksums next to the deb(s) so consumers can verify what they fetch.
