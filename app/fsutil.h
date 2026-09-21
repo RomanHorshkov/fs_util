@@ -4,7 +4,7 @@
  *
  * This header exposes a dirfd-based API for code that wants explicit control
  * over filesystem traversal, verification, ownership, and durability.
- * 
+ *
  * @author  Roman Horshkov <github.com/RomanHorshkov>
  * @date    2026
  * (c) 2026
@@ -21,7 +21,6 @@
 #include <stddef.h>    /* for size_t */
 #include <sys/stat.h>  /* for stat, mode_t */
 #include <sys/types.h> /* for uid_t, gid_t */
-
 
 /*****************************************************************************************************************************************
  * PUBLIC FUNCTIONS PROTOTYPES
@@ -47,7 +46,8 @@
  *
  * - bootstrap once from a trusted directory capability
  * - walk relative paths component-by-component
- * - reject symlinks during capability acquisition
+ * - reject symlinks during capability acquisition (fs_dir_open_abs_nofollow()
+ *   extends that to every component of an absolute path)
  * - verify the opened object after acquisition
  * - keep durability policy explicit:
  *   create/rename/unlink helpers do not fsync parent directories implicitly
@@ -337,11 +337,41 @@ int fs_component_is_valid(const char* name);
  * Failure cases:
  * - -EINVAL if `out_dir` is null, `abs_path` is null/empty, or not absolute.
  * - -EBUSY if `out_dir` already owns an fd.
- * - -ELOOP if the final component is a symlink and the kernel reports it.
+ * - -ENOTDIR if the final component is a symlink: with O_DIRECTORY|O_NOFOLLOW the
+ *   kernel reports the link as "not a directory" (older kernels report -ELOOP).
+ *   Either way the link is never followed.
  * - -ENOTDIR / -EACCES if verification fails.
  * - other negative errno from open(), fcntl(), or fstat().
  */
 int fs_dir_open_abs(const char* abs_path, const fs_expect_t* expect, fs_dir_t* out_dir);
+
+/**
+ * @brief Open an absolute directory path as a capability root, refusing symlinks anywhere.
+ *
+ * The strict sibling of fs_dir_open_abs(): instead of letting the kernel resolve the
+ * parent chain, this starts from "/" and walks every component with O_NOFOLLOW through
+ * the same engine as fs_dir_walk_open(). A symlink at ANY position in the path is
+ * therefore rejected (-ENOTDIR, older kernels -ELOOP), and ".." is refused (-EINVAL). Use it when the parent
+ * chain is not provisioned by you, or when "the directory I open is exactly the
+ * directory named by this string" has to hold against a hostile neighbour.
+ *
+ * @param abs_path Absolute directory path. Must begin with '/'. "/" itself is accepted.
+ * @param expect Expected metadata applied to the FINAL directory only. Intermediate
+ *               components are checked to be directories, nothing more.
+ * @param out_dir Receives the opened directory capability.
+ * @return 0 on success, negative errno on failure.
+ *
+ * Contract and ownership are those of fs_dir_open_abs().
+ *
+ * Failure cases:
+ * - -EINVAL if `out_dir` is null, `abs_path` is null/empty/not absolute, or contains "..".
+ * - -EBUSY if `out_dir` already owns an fd.
+ * - -ENOTDIR if any component is a symlink (older kernels: -ELOOP); never followed.
+ * - -ENAMETOOLONG if any single component is longer than NAME_MAX.
+ * - -ENOTDIR / -EACCES if verification fails.
+ * - other negative errno from open(), openat(), fcntl(), or fstat().
+ */
+int fs_dir_open_abs_nofollow(const char* abs_path, const fs_expect_t* expect, fs_dir_t* out_dir);
 
 /**
  * @brief Open the current working directory as a capability root.
@@ -431,7 +461,7 @@ int fs_file_verify(int fd, const fs_expect_t* expect);
  *
  * Path rules:
  * - `name` must be a single path component
- * - symlinks are rejected on the final component
+ * - symlinks are rejected on the final component (-ENOTDIR; older kernels -ELOOP)
  *
  * Contract:
  * - `parent` must be a valid directory capability
@@ -445,7 +475,8 @@ int fs_file_verify(int fd, const fs_expect_t* expect);
  * Typical failure cases:
  * - -EINVAL for invalid inputs or invalid component names
  * - -EBUSY if `out_dir` already owns an fd
- * - -ELOOP if the final component is a symlink and the kernel reports it
+ * - -ENOTDIR if the final component is a symlink (O_DIRECTORY|O_NOFOLLOW; older
+ *   kernels report -ELOOP) — the link is never followed
  * - -ENOTDIR / -EACCES if verification fails
  * - other negative errno from openat(), fcntl(), or fstat()
  */
@@ -515,7 +546,7 @@ int fs_dir_create_at(const fs_dir_t* parent, const char* name, mode_t create_mod
  * - absolute paths are rejected
  * - "." components are ignored
  * - ".." components are rejected
- * - symlinks are rejected at each component
+ * - symlinks are rejected at each component (-ENOTDIR; older kernels -ELOOP)
  * - empty or "."-only paths resolve to a verified duplicate of `start`
  *
  * Contract:
@@ -589,7 +620,7 @@ int fs_dir_walk_create(const fs_dir_t* start, const char* relative_path, mode_t 
  *
  * Path rules:
  * - `name` must be a single path component
- * - symlinks are rejected on the final component
+ * - symlinks are rejected on the final component (-ELOOP)
  *
  * Contract:
  * - `parent` must be a valid directory capability
@@ -693,6 +724,23 @@ int fs_file_create_write_new_at(const fs_dir_t* parent, const char* name, mode_t
 int fs_rename_at(const fs_dir_t* old_parent, const char* old_name, const fs_dir_t* new_parent, const char* new_name);
 
 /**
+ * @brief Rename a single path component, refusing to replace an existing destination.
+ *
+ * Same path rules, capability checks and durability notes as fs_rename_at(), but the
+ * kernel performs the "does the destination exist" check and the rename as ONE
+ * operation (renameat2 with RENAME_NOREPLACE). There is no probe-then-rename window,
+ * so a concurrent writer can never slip a destination in between: either the rename
+ * happens and the destination did not exist, or -EEXIST comes back and nothing moved.
+ *
+ * Requires Linux 3.15+ and a filesystem that implements RENAME_NOREPLACE (every
+ * mainstream local filesystem does). A filesystem that does not reports -EINVAL;
+ * that is propagated, not masked, so the caller can decide on a fallback.
+ *
+ * @return 0 on success, -EEXIST if `new_name` already exists, other negative errno on failure.
+ */
+int fs_rename_noreplace_at(const fs_dir_t* old_parent, const char* old_name, const fs_dir_t* new_parent, const char* new_name);
+
+/**
  * @brief Unlink a single non-directory entry under a directory capability.
  *
  * Path rules:
@@ -741,7 +789,5 @@ int fs_dir_fsync(const fs_dir_t* dir);
  *   is attempted
  */
 int fs_file_fsync(int fd);
-
-
 
 #endif /* FSUTIL_H */

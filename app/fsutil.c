@@ -2,7 +2,7 @@
  * @file fsutil.c
  * @brief Capability-oriented filesystem implementation.
  *
- * @author  Roman Horshkov <github.com/RomanHorshkov>
+ * @author  Roman Horshkov <github.com/RomanHorshkov>
  * @date    2026
  * (c) 2026
  */
@@ -26,7 +26,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h> /* NAME_MAX */
-#include <stdio.h>  /* renameat */
+#include <stdio.h>  /* renameat, renameat2, RENAME_NOREPLACE */
 #include <string.h> /* memcpy, strcmp, strchr */
 #include <unistd.h> /* close, fsync, unlinkat, fchmod, fstat, geteuid, getegid */
 
@@ -35,6 +35,45 @@
  *****************************************************************************************************************************************
  */
 #define STRING_IS_NULL_OR_EMPTY(s) ((!s) || !*(s))
+
+/*
+ * Every kernel call this library makes goes through one of the FS_SYS_* macros.
+ *
+ * Production builds map them straight onto libc. Test builds (-DFS_UTIL_TESTING)
+ * route them through a table of function pointers the unit tests can replace,
+ * which is the only way to drive the failure branches that a real filesystem
+ * will not produce on demand (fchmod() failing on a file we just created,
+ * fstat() failing on an open fd, fcntl() refusing F_GETFL, fsync() reporting
+ * EIO, ...). The seam adds no symbol to the production library.
+ */
+#ifdef FS_UTIL_TESTING
+#    include "fsutil_test_hooks.h"
+#    define FS_SYS_OPEN(path, flags)                        (fs_test_hooks.open((path), (flags)))
+#    define FS_SYS_OPENAT(dirfd, name, flags, mode)         (fs_test_hooks.openat((dirfd), (name), (flags), (mode)))
+#    define FS_SYS_MKDIRAT(dirfd, name, mode)               (fs_test_hooks.mkdirat((dirfd), (name), (mode)))
+#    define FS_SYS_FCHMOD(fd, mode)                         (fs_test_hooks.fchmod((fd), (mode)))
+#    define FS_SYS_FSTAT(fd, st)                            (fs_test_hooks.fstat((fd), (st)))
+#    define FS_SYS_FCNTL(fd, cmd, arg)                      (fs_test_hooks.fcntl((fd), (cmd), (arg)))
+#    define FS_SYS_FSYNC(fd)                                (fs_test_hooks.fsync((fd)))
+#    define FS_SYS_RENAMEAT(ofd, oname, nfd, nname)         (fs_test_hooks.renameat((ofd), (oname), (nfd), (nname)))
+#    define FS_SYS_RENAMEAT2(ofd, oname, nfd, nname, flags) (fs_test_hooks.renameat2((ofd), (oname), (nfd), (nname), (flags)))
+#    define FS_SYS_UNLINKAT(dirfd, name, flags)             (fs_test_hooks.unlinkat((dirfd), (name), (flags)))
+#else
+#    define FS_SYS_OPEN(path, flags)                        open((path), (flags))
+#    define FS_SYS_OPENAT(dirfd, name, flags, mode)         openat((dirfd), (name), (flags), (mode))
+#    define FS_SYS_MKDIRAT(dirfd, name, mode)               mkdirat((dirfd), (name), (mode))
+#    define FS_SYS_FCHMOD(fd, mode)                         fchmod((fd), (mode))
+#    define FS_SYS_FSTAT(fd, st)                            fstat((fd), (st))
+#    define FS_SYS_FCNTL(fd, cmd, arg)                      fcntl((fd), (cmd), (arg))
+#    define FS_SYS_FSYNC(fd)                                fsync((fd))
+#    define FS_SYS_RENAMEAT(ofd, oname, nfd, nname)         renameat((ofd), (oname), (nfd), (nname))
+#    define FS_SYS_RENAMEAT2(ofd, oname, nfd, nname, flags) renameat2((ofd), (oname), (nfd), (nname), (flags))
+#    define FS_SYS_UNLINKAT(dirfd, name, flags)             unlinkat((dirfd), (name), (flags))
+#endif
+
+/* Flags shared by every directory acquisition in this file: read-only, must be a
+ * directory, never survives exec(), never follows a symlink at the final component. */
+#define FS_DIR_OPEN_FLAGS (O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
 
 /*****************************************************************************************************************************************
  * PRIVATE ENUMERATED TYPEDEFS
@@ -53,6 +92,18 @@ enum _fs_component_state
     _FS_COMPONENT_STATE_VALUE
 };
 
+enum _fs_walk_mode
+{
+    _FS_WALK_OPEN_EXISTING = 0,
+    _FS_WALK_CREATE_MISSING
+};
+
+/*****************************************************************************************************************************************
+ * PRIVATE STRUCTURED TYPEDEFS
+ *****************************************************************************************************************************************
+ */
+/* None */
+
 /*****************************************************************************************************************************************
  * PRIVATE STRUCTURED VARIABLES
  *****************************************************************************************************************************************
@@ -63,7 +114,52 @@ enum _fs_component_state
  * PRIVATE VARIABLES
  *****************************************************************************************************************************************
  */
-/* None */
+
+#ifdef FS_UTIL_TESTING
+static int _fs_default_open(const char* path, int flags)
+{
+    return open(path, flags);
+}
+static int _fs_default_openat(int dirfd, const char* name, int flags, mode_t mode)
+{
+    return openat(dirfd, name, flags, mode);
+}
+static int _fs_default_fcntl(int fd, int cmd, int arg)
+{
+    return fcntl(fd, cmd, arg);
+}
+static int _fs_default_renameat2(int ofd, const char* oname, int nfd, const char* nname, unsigned int flags)
+{
+    return renameat2(ofd, oname, nfd, nname, flags);
+}
+
+fs_test_hooks_t fs_test_hooks = {
+    .open      = _fs_default_open,
+    .openat    = _fs_default_openat,
+    .mkdirat   = mkdirat,
+    .fchmod    = fchmod,
+    .fstat     = fstat,
+    .fcntl     = _fs_default_fcntl,
+    .fsync     = fsync,
+    .renameat  = renameat,
+    .renameat2 = _fs_default_renameat2,
+    .unlinkat  = unlinkat,
+};
+
+void fs_test_hooks_reset(void)
+{
+    fs_test_hooks.open      = _fs_default_open;
+    fs_test_hooks.openat    = _fs_default_openat;
+    fs_test_hooks.mkdirat   = mkdirat;
+    fs_test_hooks.fchmod    = fchmod;
+    fs_test_hooks.fstat     = fstat;
+    fs_test_hooks.fcntl     = _fs_default_fcntl;
+    fs_test_hooks.fsync     = fsync;
+    fs_test_hooks.renameat  = renameat;
+    fs_test_hooks.renameat2 = _fs_default_renameat2;
+    fs_test_hooks.unlinkat  = unlinkat;
+}
+#endif
 
 /*****************************************************************************************************************************************
  * PRIVATE FUNCTIONS PROTOTYPES
@@ -117,6 +213,37 @@ static int _fs_verify_stat(const struct stat* st, enum _fs_verify_object_kind ob
 static int _fs_component_next(const char** cursor, char* out_component, size_t out_component_size, enum _fs_component_state* out_state);
 
 /**
+ * @brief Walk a relative path from an already-verified directory fd, one component at a time.
+ *
+ * @param start_fd Verified directory fd to start from (not consumed, not closed).
+ * @param relative_path Relative path; '/' runs collapse, "." is skipped, ".." is refused.
+ * @param mode _FS_WALK_OPEN_EXISTING opens each component with O_NOFOLLOW; _FS_WALK_CREATE_MISSING
+ *             creates missing components through fs_dir_create_at().
+ * @param create_mode Mode for components created in _FS_WALK_CREATE_MISSING mode.
+ * @param each_expect Expectation applied to every walked component (null = directory type only).
+ * @param out_fd Receives the final component's fd, or -1 when no component was walked.
+ * @param out_walked Receives the number of components actually walked.
+ * @return 0 on success, negative errno on failure. Never leaks a transient fd on failure.
+ *
+ * This is the single traversal engine behind fs_dir_walk_open(), fs_dir_walk_create() and
+ * fs_dir_open_abs_nofollow(): every symlink at every component is rejected by the kernel
+ * (O_NOFOLLOW on each openat()), and every ".." is rejected here, so the walk can never
+ * leave the subtree rooted at start_fd.
+ */
+static int _fs_walk(int start_fd, const char* relative_path, enum _fs_walk_mode mode, mode_t create_mode, const fs_expect_t* each_expect,
+                    int* out_fd, size_t* out_walked);
+
+/**
+ * @brief Open an EXISTING regular file under a parent capability with the given access mode.
+ *
+ * Shared body of fs_file_open_read_at() and fs_file_open_rw_at(): O_NOFOLLOW, the
+ * O_NONBLOCK|O_NOCTTY acquisition, fs_file_verify(), then the blocking flags restored.
+ *
+ * @param access_flags O_RDONLY or O_RDWR.
+ */
+static int _fs_file_open_existing_at(const fs_dir_t* parent, const char* name, const fs_expect_t* expect, int* out_fd, int access_flags);
+
+/**
  * @brief Duplicate a directory fd with FD_CLOEXEC preserved.
  *
  * @param fd Directory fd to duplicate.
@@ -132,7 +259,7 @@ static int _fs_dup_dir_fd(int fd, int* out_fd);
  * @param name Single child name to unlink.
  *
  * This cleanup is name-based and intended for trusted/private parent
- * directories.
+ * directories. The caller's errno is preserved across it.
  */
 static void _fs_cleanup_created_file_at(int parent_fd, const char* name);
 
@@ -143,7 +270,7 @@ static void _fs_cleanup_created_file_at(int parent_fd, const char* name);
  * @param name Single child name to remove with AT_REMOVEDIR.
  *
  * This cleanup is name-based and intended for trusted/private parent
- * directories.
+ * directories. The caller's errno is preserved across it.
  */
 static void _fs_cleanup_created_directory_at(int parent_fd, const char* name);
 
@@ -209,7 +336,7 @@ int fs_dir_open_cwd(fs_dir_t* out_dir)
     if(out_dir->fd != -1) return -EBUSY;
 
     /* Bootstrap a capability from the current working directory. */
-    int fd = open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    int fd = FS_SYS_OPEN(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if(fd < 0) return -errno;
 
     /* Transfer ownership of the opened fd to the output handle. */
@@ -228,7 +355,7 @@ int fs_dir_open_abs(const char* abs_path, const fs_expect_t* expect, fs_dir_t* o
     /* Bootstrap a capability from an absolute directory root. O_NOFOLLOW
      * rejects a symlink at the final component; the trusted parent chain is
      * resolved normally. */
-    int fd = open(abs_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int fd = FS_SYS_OPEN(abs_path, FS_DIR_OPEN_FLAGS);
     if(fd < 0) return -errno;
 
     /* Apply the same verification the *at helpers apply after open. */
@@ -245,6 +372,52 @@ int fs_dir_open_abs(const char* abs_path, const fs_expect_t* expect, fs_dir_t* o
     return 0;
 }
 
+int fs_dir_open_abs_nofollow(const char* abs_path, const fs_expect_t* expect, fs_dir_t* out_dir)
+{
+    /* Check input. */
+    if(!out_dir) return -EINVAL;
+    if(STRING_IS_NULL_OR_EMPTY(abs_path)) return -EINVAL;
+    if(abs_path[0] != '/') return -EINVAL;
+    if(out_dir->fd != -1) return -EBUSY;
+
+    /* Start from the filesystem root; from here on every component is opened with
+     * O_NOFOLLOW by the shared walker, so a symlink ANYWHERE in the chain is refused,
+     * not only at the final component as in fs_dir_open_abs(). */
+    int root_fd = FS_SYS_OPEN("/", FS_DIR_OPEN_FLAGS);
+    if(root_fd < 0) return -errno;
+
+    int    final_fd = -1;
+    size_t walked   = 0U;
+    int    rc       = _fs_walk(root_fd, abs_path + 1, _FS_WALK_OPEN_EXISTING, 0, NULL, &final_fd, &walked);
+    if(rc != 0)
+    {
+        close(root_fd);
+        return rc;
+    }
+
+    /* "/" itself (or "/./") resolves to the root fd; otherwise the walked leaf. */
+    if(walked == 0U)
+    {
+        final_fd = root_fd;
+    }
+    else
+    {
+        close(root_fd);
+    }
+
+    /* The caller's expectation applies to the final directory only. */
+    rc = fs_dir_verify(&(fs_dir_t){.fd = final_fd}, expect);
+    if(rc != 0)
+    {
+        close(final_fd);
+        return rc;
+    }
+
+    /* Transfer ownership of the final fd to the output handle. */
+    out_dir->fd = final_fd;
+    return 0;
+}
+
 int fs_dir_verify(const fs_dir_t* dir, const fs_expect_t* expect)
 {
     /* Check input. */
@@ -256,7 +429,7 @@ int fs_dir_verify(const fs_dir_t* dir, const fs_expect_t* expect)
 
     /* Read metadata from the already-open directory fd. */
     struct stat st;
-    if(fstat(dir->fd, &st) != 0) return -errno;
+    if(FS_SYS_FSTAT(dir->fd, &st) != 0) return -errno;
 
     /* Verify directory type first, then optional mode/uid/gid expectations. */
     return _fs_verify_stat(&st, _FS_VERIFY_OBJECT_DIRECTORY, expect);
@@ -273,7 +446,7 @@ int fs_file_verify(int fd, const fs_expect_t* expect)
 
     /* Read metadata from the already-open regular-file fd. */
     struct stat st;
-    if(fstat(fd, &st) != 0) return -errno;
+    if(FS_SYS_FSTAT(fd, &st) != 0) return -errno;
 
     /* Verify file type first, then optional mode/uid/gid expectations. */
     return _fs_verify_stat(&st, _FS_VERIFY_OBJECT_REGULAR_FILE, expect);
@@ -291,7 +464,7 @@ int fs_dir_open_at(const fs_dir_t* parent, const char* name, const fs_expect_t* 
     if(rc != 0) return rc;
 
     /* Open exactly one child directory, rejecting a final symlink. */
-    int fd = openat(parent->fd, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int fd = FS_SYS_OPENAT(parent->fd, name, FS_DIR_OPEN_FLAGS, 0);
     if(fd < 0) return -errno;
 
     /* Verify the opened child before returning its capability. */
@@ -332,7 +505,7 @@ int fs_dir_create_at(const fs_dir_t* parent, const char* name, mode_t create_mod
      * This avoids a separate existence check and therefore avoids the classic
      * check-then-create race.
      */
-    if(mkdirat(parent->fd, name, create_mode) == 0)
+    if(FS_SYS_MKDIRAT(parent->fd, name, create_mode) == 0)
     {
         create_disposition = FS_CREATE_DISPOSITION_CREATED_NEW;
     }
@@ -342,7 +515,7 @@ int fs_dir_create_at(const fs_dir_t* parent, const char* name, mode_t create_mod
     }
 
     /* Open the resulting directory capability, rejecting a final symlink. */
-    int fd = openat(parent->fd, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int fd = FS_SYS_OPENAT(parent->fd, name, FS_DIR_OPEN_FLAGS, 0);
     if(fd < 0)
     {
         int saved_errno = errno;
@@ -354,7 +527,7 @@ int fs_dir_create_at(const fs_dir_t* parent, const char* name, mode_t create_mod
      * Force the final directory mode explicitly.
      * This makes the result independent from the caller's current umask.
      */
-    if(create_disposition == FS_CREATE_DISPOSITION_CREATED_NEW && fchmod(fd, create_mode) != 0)
+    if(create_disposition == FS_CREATE_DISPOSITION_CREATED_NEW && FS_SYS_FCHMOD(fd, create_mode) != 0)
     {
         int saved_errno = errno;
         close(fd);
@@ -406,63 +579,12 @@ int fs_dir_walk_open(const fs_dir_t* start, const char* relative_path, const fs_
     if(rc != 0) return rc;
 
     /* Walk relative_path one component at a time from the starting capability. */
-    const char* cursor                 = relative_path;
-    int         parent_fd              = start->fd;
-    int         current_fd             = -1;
-    size_t      walked_component_count = 0U;
+    int    final_fd = -1;
+    size_t walked   = 0U;
+    rc              = _fs_walk(start->fd, relative_path, _FS_WALK_OPEN_EXISTING, 0, expect, &final_fd, &walked);
+    if(rc != 0) return rc;
 
-    for(;;)
-    {
-        /* Parse the next relative path component. */
-        char                     component[NAME_MAX + 1];
-        enum _fs_component_state component_state = _FS_COMPONENT_STATE_END;
-        rc                                       = _fs_component_next(&cursor, component, sizeof(component), &component_state);
-        if(rc != 0)
-        {
-            /* Failure during walk must not leak any transient fd. */
-            if(current_fd >= 0) close(current_fd);
-            return rc;
-        }
-
-        /* No more components means the walk is complete. */
-        if(component_state == _FS_COMPONENT_STATE_END) break;
-
-        /* Ignore "." components so callers may pass "./database/". */
-        if(strcmp(component, ".") == 0) continue;
-
-        /* Reject ".." so the walk cannot escape the trusted starting point. */
-        if(strcmp(component, "..") == 0)
-        {
-            if(current_fd >= 0) close(current_fd);
-            return -EINVAL;
-        }
-
-        /* Open exactly one child directory, rejecting a final symlink. */
-        int next_fd = openat(parent_fd, component, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-        if(next_fd < 0)
-        {
-            int saved_errno = errno;
-            if(current_fd >= 0) close(current_fd);
-            return -saved_errno;
-        }
-
-        /* Verify the opened child against the caller's policy. */
-        rc = fs_dir_verify(&(fs_dir_t){.fd = next_fd}, expect);
-        if(rc != 0)
-        {
-            close(next_fd);
-            if(current_fd >= 0) close(current_fd);
-            return rc;
-        }
-
-        /* Move the walk forward and release the previous transient directory fd. */
-        if(current_fd >= 0) close(current_fd);
-        current_fd = next_fd;
-        parent_fd  = next_fd;
-        ++walked_component_count;
-    }
-
-    if(walked_component_count == 0U)
+    if(walked == 0U)
     {
         /* Empty or "."-only paths resolve to the starting capability itself. */
         rc = fs_dir_verify(start, expect);
@@ -471,7 +593,7 @@ int fs_dir_walk_open(const fs_dir_t* start, const char* relative_path, const fs_
     }
 
     /* Transfer ownership of the final walked directory fd to the output handle. */
-    out_dir->fd = current_fd;
+    out_dir->fd = final_fd;
     return 0;
 }
 
@@ -487,57 +609,13 @@ int fs_dir_walk_create(const fs_dir_t* start, const char* relative_path, mode_t 
     int rc = fs_dir_verify(start, NULL);
     if(rc != 0) return rc;
 
-    /* Walk relative_path one component at a time from the starting capability. */
-    const char* cursor                 = relative_path;
-    int         parent_fd              = start->fd;
-    int         current_fd             = -1;
-    size_t      walked_component_count = 0U;
+    /* Walk relative_path one component at a time, creating what is missing. */
+    int    final_fd = -1;
+    size_t walked   = 0U;
+    rc              = _fs_walk(start->fd, relative_path, _FS_WALK_CREATE_MISSING, create_mode, expect, &final_fd, &walked);
+    if(rc != 0) return rc;
 
-    for(;;)
-    {
-        /* Parse the next relative path component. */
-        char                     component[NAME_MAX + 1];
-        enum _fs_component_state component_state = _FS_COMPONENT_STATE_END;
-        rc                                       = _fs_component_next(&cursor, component, sizeof(component), &component_state);
-        if(rc != 0)
-        {
-            /* Failure during walk must not leak any transient fd. */
-            if(current_fd >= 0) close(current_fd);
-            return rc;
-        }
-
-        /* No more components means the walk is complete. */
-        if(component_state == _FS_COMPONENT_STATE_END) break;
-
-        /* Ignore "." components so callers may pass "./database/". */
-        if(strcmp(component, ".") == 0) continue;
-
-        /* Reject ".." so the walk cannot escape the trusted starting point. */
-        if(strcmp(component, "..") == 0)
-        {
-            if(current_fd >= 0) close(current_fd);
-            return -EINVAL;
-        }
-
-        /* Create-or-open exactly one child directory component. */
-        fs_dir_t next_dir;
-        fs_dir_init(&next_dir);
-        rc = fs_dir_create_at(&(fs_dir_t){.fd = parent_fd}, component, create_mode, expect, &next_dir, NULL);
-        if(rc != 0)
-        {
-            /* Failure during walk must not leak any transient fd. */
-            if(current_fd >= 0) close(current_fd);
-            return rc;
-        }
-
-        /* Move the walk forward and release the previous transient directory fd. */
-        if(current_fd >= 0) close(current_fd);
-        current_fd = next_dir.fd;
-        parent_fd  = next_dir.fd;
-        ++walked_component_count;
-    }
-
-    if(walked_component_count == 0U)
+    if(walked == 0U)
     {
         /* Empty or "."-only paths resolve to the starting capability itself. */
         rc = fs_dir_verify(start, expect);
@@ -546,107 +624,18 @@ int fs_dir_walk_create(const fs_dir_t* start, const char* relative_path, mode_t 
     }
 
     /* Transfer ownership of the final walked directory fd to the output handle. */
-    out_dir->fd = current_fd;
+    out_dir->fd = final_fd;
     return 0;
 }
 
 int fs_file_open_read_at(const fs_dir_t* parent, const char* name, const fs_expect_t* expect, int* out_fd)
 {
-    /* Check output pointer first so raw-fd ownership is reset whenever possible. */
-    if(!out_fd) return -EINVAL;
-
-    /* Reset raw-fd output immediately so failure never leaves stale ownership behind. */
-    *out_fd = -1;
-
-    /* Check the remaining inputs. */
-    if(!parent || parent->fd < 0) return -EINVAL;
-    if(!fs_component_is_valid(name)) return -EINVAL;
-
-    /* Parent must already be a valid directory capability. */
-    int rc = fs_dir_verify(parent, NULL);
-    if(rc != 0) return rc;
-
-    /*
-     * Open nonblocking first.
-     * This avoids hanging on FIFOs or other special files before type
-     * verification rejects them, and O_NOCTTY avoids controlling-terminal
-     * side effects if the path names a terminal-like device.
-     */
-    int fd = openat(parent->fd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY);
-    if(fd < 0) return -errno;
-
-    /* Verify the opened child before returning its fd to the caller. */
-    rc = fs_file_verify(fd, expect);
-    if(rc != 0)
-    {
-        /* Verification failure means we must not leak the temporary fd. */
-        close(fd);
-        return rc;
-    }
-
-    /*
-     * Restore normal blocking status on the returned fd.
-     * O_NONBLOCK was used only to make acquisition of non-regular files safe.
-     */
-    int status_flags = fcntl(fd, F_GETFL);
-    if(status_flags < 0)
-    {
-        int saved_errno = errno;
-        close(fd);
-        return -saved_errno;
-    }
-    if((status_flags & O_NONBLOCK) != 0 && fcntl(fd, F_SETFL, status_flags & ~O_NONBLOCK) != 0)
-    {
-        int saved_errno = errno;
-        close(fd);
-        return -saved_errno;
-    }
-
-    /* Transfer ownership of the opened fd to the caller. */
-    *out_fd = fd;
-    return 0;
+    return _fs_file_open_existing_at(parent, name, expect, out_fd, O_RDONLY);
 }
 
 int fs_file_open_rw_at(const fs_dir_t* parent, const char* name, const fs_expect_t* expect, int* out_fd)
 {
-    /* Read-WRITE reopen of an EXISTING regular file under a directory capability. Identical safety to
-     * fs_file_open_read_at() (O_NOFOLLOW, NONBLOCK-then-clear, fs_file_verify) but O_RDWR so the caller
-     * may seek + append (resumable upload spool). Never creates: the file must already exist. */
-    if(!out_fd) return -EINVAL;
-    *out_fd = -1;
-
-    if(!parent || parent->fd < 0) return -EINVAL;
-    if(!fs_component_is_valid(name)) return -EINVAL;
-
-    int rc = fs_dir_verify(parent, NULL);
-    if(rc != 0) return rc;
-
-    int fd = openat(parent->fd, name, O_RDWR | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY);
-    if(fd < 0) return -errno;
-
-    rc = fs_file_verify(fd, expect);
-    if(rc != 0)
-    {
-        close(fd);
-        return rc;
-    }
-
-    int status_flags = fcntl(fd, F_GETFL);
-    if(status_flags < 0)
-    {
-        int saved_errno = errno;
-        close(fd);
-        return -saved_errno;
-    }
-    if((status_flags & O_NONBLOCK) != 0 && fcntl(fd, F_SETFL, status_flags & ~O_NONBLOCK) != 0)
-    {
-        int saved_errno = errno;
-        close(fd);
-        return -saved_errno;
-    }
-
-    *out_fd = fd;
-    return 0;
+    return _fs_file_open_existing_at(parent, name, expect, out_fd, O_RDWR);
 }
 
 int fs_file_create_write_new_at(const fs_dir_t* parent, const char* name, mode_t create_mode, const fs_expect_t* expect, int* out_fd)
@@ -667,14 +656,14 @@ int fs_file_create_write_new_at(const fs_dir_t* parent, const char* name, mode_t
     if(rc != 0) return rc;
 
     /* Create a brand-new child file, rejecting a final symlink and avoiding controlling-terminal side effects. */
-    int fd = openat(parent->fd, name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW | O_NOCTTY, create_mode);
+    int fd = FS_SYS_OPENAT(parent->fd, name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW | O_NOCTTY, create_mode);
     if(fd < 0) return -errno;
 
     /*
      * Force the final file mode explicitly.
      * This makes the result independent from the caller's current umask.
      */
-    if(fchmod(fd, create_mode) != 0)
+    if(FS_SYS_FCHMOD(fd, create_mode) != 0)
     {
         int saved_errno = errno;
         close(fd);
@@ -721,7 +710,25 @@ int fs_rename_at(const fs_dir_t* old_parent, const char* old_name, const fs_dir_
     if(rc != 0) return rc;
 
     /* Rename exactly one path component from old_parent to new_parent. */
-    if(renameat(old_parent->fd, old_name, new_parent->fd, new_name) != 0) return -errno;
+    if(FS_SYS_RENAMEAT(old_parent->fd, old_name, new_parent->fd, new_name) != 0) return -errno;
+    return 0;
+}
+
+int fs_rename_noreplace_at(const fs_dir_t* old_parent, const char* old_name, const fs_dir_t* new_parent, const char* new_name)
+{
+    /* Check input. */
+    if(!old_parent || old_parent->fd < 0 || !new_parent || new_parent->fd < 0) return -EINVAL;
+    if(!fs_component_is_valid(old_name) || !fs_component_is_valid(new_name)) return -EINVAL;
+
+    /* Both parents must already be valid directory capabilities. */
+    int rc = fs_dir_verify(old_parent, NULL);
+    if(rc != 0) return rc;
+    rc = fs_dir_verify(new_parent, NULL);
+    if(rc != 0) return rc;
+
+    /* One kernel call: the existence check and the rename are the same operation, so
+     * there is no window in which another writer can slip a destination in between. */
+    if(FS_SYS_RENAMEAT2(old_parent->fd, old_name, new_parent->fd, new_name, RENAME_NOREPLACE) != 0) return -errno;
     return 0;
 }
 
@@ -736,7 +743,7 @@ int fs_unlink_at(const fs_dir_t* parent, const char* name)
     if(rc != 0) return rc;
 
     /* Unlink exactly one child entry from the parent capability. */
-    if(unlinkat(parent->fd, name, 0) != 0) return -errno;
+    if(FS_SYS_UNLINKAT(parent->fd, name, 0) != 0) return -errno;
     return 0;
 }
 
@@ -747,7 +754,7 @@ int fs_dir_fsync(const fs_dir_t* dir)
     if(rc != 0) return rc;
 
     /* Some filesystems do not support directory fsync; treat EINVAL as success. */
-    if(fsync(dir->fd) == 0) return 0;
+    if(FS_SYS_FSYNC(dir->fd) == 0) return 0;
     if(errno == EINVAL) return 0;
     return -errno;
 }
@@ -759,7 +766,7 @@ int fs_file_fsync(int fd)
     if(rc != 0) return rc;
 
     /* Push regular-file data and metadata to stable storage. */
-    if(fsync(fd) != 0) return -errno;
+    if(FS_SYS_FSYNC(fd) != 0) return -errno;
     return 0;
 }
 
@@ -770,23 +777,15 @@ int fs_file_fsync(int fd)
 
 static int _fs_verify_stat(const struct stat* st, enum _fs_verify_object_kind object_kind, const fs_expect_t* expect)
 {
-    /* Check input. */
-    if(!st) return -EINVAL;
-
     /* Verify the object type first; mode/uid/gid checks happen only afterwards. */
-    switch(object_kind)
+    if(object_kind == _FS_VERIFY_OBJECT_DIRECTORY)
     {
-        case _FS_VERIFY_OBJECT_DIRECTORY:
-            if(!S_ISDIR(st->st_mode)) return -ENOTDIR;
-            break;
-
-        case _FS_VERIFY_OBJECT_REGULAR_FILE:
-            if(S_ISDIR(st->st_mode)) return -EISDIR;
-            if(!S_ISREG(st->st_mode)) return -EINVAL;
-            break;
-
-        default:
-            return -EINVAL;
+        if(!S_ISDIR(st->st_mode)) return -ENOTDIR;
+    }
+    else
+    {
+        if(S_ISDIR(st->st_mode)) return -EISDIR;
+        if(!S_ISREG(st->st_mode)) return -EINVAL;
     }
 
     /* Null expectation means "type check only". */
@@ -809,9 +808,6 @@ static int _fs_verify_stat(const struct stat* st, enum _fs_verify_object_kind ob
 
 static int _fs_component_next(const char** cursor, char* out_component, size_t out_component_size, enum _fs_component_state* out_state)
 {
-    /* Check input. */
-    if(!cursor || !*cursor || !out_component || out_component_size < 2 || !out_state) return -EINVAL;
-
     /* Start from the current scan position. */
     const char* p = *cursor;
 
@@ -836,7 +832,7 @@ static int _fs_component_next(const char** cursor, char* out_component, size_t o
 
     /* Compute component length and ensure it fits into the caller buffer. */
     size_t len = (size_t)(p - start);
-    if(len == 0 || len >= out_component_size) return -ENAMETOOLONG;
+    if(len >= out_component_size) return -ENAMETOOLONG;
 
     /* Copy the parsed component and NUL-terminate it. */
     memcpy(out_component, start, len);
@@ -848,13 +844,148 @@ static int _fs_component_next(const char** cursor, char* out_component, size_t o
     return 0;
 }
 
+static int _fs_walk(int start_fd, const char* relative_path, enum _fs_walk_mode mode, mode_t create_mode, const fs_expect_t* each_expect,
+                    int* out_fd, size_t* out_walked)
+{
+    const char* cursor     = relative_path;
+    int         parent_fd  = start_fd;
+    int         current_fd = -1;
+    size_t      walked     = 0U;
+    int         rc;
+
+    *out_fd     = -1;
+    *out_walked = 0U;
+
+    for(;;)
+    {
+        /* Parse the next relative path component. */
+        char                     component[NAME_MAX + 1];
+        enum _fs_component_state component_state = _FS_COMPONENT_STATE_END;
+        rc                                       = _fs_component_next(&cursor, component, sizeof(component), &component_state);
+        if(rc != 0) break;
+
+        /* No more components means the walk is complete. */
+        if(component_state == _FS_COMPONENT_STATE_END) break;
+
+        /* Ignore "." components so callers may pass "./database/". */
+        if(strcmp(component, ".") == 0) continue;
+
+        /* Reject ".." so the walk cannot escape the trusted starting point. */
+        if(strcmp(component, "..") == 0)
+        {
+            rc = -EINVAL;
+            break;
+        }
+
+        int next_fd = -1;
+        if(mode == _FS_WALK_OPEN_EXISTING)
+        {
+            /* Open exactly one child directory, rejecting a final symlink. */
+            next_fd = FS_SYS_OPENAT(parent_fd, component, FS_DIR_OPEN_FLAGS, 0);
+            if(next_fd < 0)
+            {
+                rc = -errno;
+                break;
+            }
+
+            /* Verify the opened child against the caller's policy. */
+            rc = fs_dir_verify(&(fs_dir_t){.fd = next_fd}, each_expect);
+            if(rc != 0)
+            {
+                close(next_fd);
+                break;
+            }
+        }
+        else
+        {
+            /* Create-or-open exactly one child directory component. */
+            fs_dir_t next_dir;
+            fs_dir_init(&next_dir);
+            rc = fs_dir_create_at(&(fs_dir_t){.fd = parent_fd}, component, create_mode, each_expect, &next_dir, NULL);
+            if(rc != 0) break;
+            next_fd = next_dir.fd;
+        }
+
+        /* Move the walk forward and release the previous transient directory fd. */
+        if(current_fd >= 0) close(current_fd);
+        current_fd = next_fd;
+        parent_fd  = next_fd;
+        ++walked;
+    }
+
+    if(rc != 0)
+    {
+        /* Failure during walk must not leak any transient fd. */
+        if(current_fd >= 0) close(current_fd);
+        return rc;
+    }
+
+    *out_fd     = current_fd;
+    *out_walked = walked;
+    return 0;
+}
+
+static int _fs_file_open_existing_at(const fs_dir_t* parent, const char* name, const fs_expect_t* expect, int* out_fd, int access_flags)
+{
+    /* Check output pointer first so raw-fd ownership is reset whenever possible. */
+    if(!out_fd) return -EINVAL;
+
+    /* Reset raw-fd output immediately so failure never leaves stale ownership behind. */
+    *out_fd = -1;
+
+    /* Check the remaining inputs. */
+    if(!parent || parent->fd < 0) return -EINVAL;
+    if(!fs_component_is_valid(name)) return -EINVAL;
+
+    /* Parent must already be a valid directory capability. */
+    int rc = fs_dir_verify(parent, NULL);
+    if(rc != 0) return rc;
+
+    /*
+     * Open nonblocking first.
+     * This avoids hanging on FIFOs or other special files before type
+     * verification rejects them, and O_NOCTTY avoids controlling-terminal
+     * side effects if the path names a terminal-like device.
+     */
+    int fd = FS_SYS_OPENAT(parent->fd, name, access_flags | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY, 0);
+    if(fd < 0) return -errno;
+
+    /* Verify the opened child before returning its fd to the caller. */
+    rc = fs_file_verify(fd, expect);
+    if(rc != 0)
+    {
+        /* Verification failure means we must not leak the temporary fd. */
+        close(fd);
+        return rc;
+    }
+
+    /*
+     * Restore normal blocking status on the returned fd.
+     * O_NONBLOCK was used only to make acquisition of non-regular files safe.
+     */
+    int status_flags = FS_SYS_FCNTL(fd, F_GETFL, 0);
+    if(status_flags < 0)
+    {
+        int saved_errno = errno;
+        close(fd);
+        return -saved_errno;
+    }
+    if((status_flags & O_NONBLOCK) != 0 && FS_SYS_FCNTL(fd, F_SETFL, status_flags & ~O_NONBLOCK) != 0)
+    {
+        int saved_errno = errno;
+        close(fd);
+        return -saved_errno;
+    }
+
+    /* Transfer ownership of the opened fd to the caller. */
+    *out_fd = fd;
+    return 0;
+}
+
 static int _fs_dup_dir_fd(int fd, int* out_fd)
 {
-    /* Check input. */
-    if(fd < 0 || !out_fd) return -EINVAL;
-
     /* Duplicate with close-on-exec preserved as an explicit capability copy. */
-    int dup_fd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+    int dup_fd = FS_SYS_FCNTL(fd, F_DUPFD_CLOEXEC, 0);
     if(dup_fd < 0) return -errno;
 
     /* Transfer the duplicated fd to the caller. */
@@ -865,7 +996,7 @@ static int _fs_dup_dir_fd(int fd, int* out_fd)
 static int _fs_fd_verify_cloexec(int fd)
 {
     /* Read descriptor flags from the kernel. */
-    int flags = fcntl(fd, F_GETFD);
+    int flags = FS_SYS_FCNTL(fd, F_GETFD, 0);
     if(flags < 0) return -errno;
 
     /* Directory/file capabilities in this layer must not survive exec(). */
@@ -882,16 +1013,17 @@ static int _fs_mode_is_valid(mode_t mode)
 
 static void _fs_cleanup_created_file_at(int parent_fd, const char* name)
 {
-    /* Best-effort cleanup for a newly-created file after post-create failure. */
-    if(parent_fd < 0 || !name) return;
-
-    (void)unlinkat(parent_fd, name, 0);
+    /* Best-effort cleanup for a newly-created file after post-create failure. The
+     * caller's errno is preserved: this runs between the failure and the return. */
+    int saved_errno = errno;
+    (void)FS_SYS_UNLINKAT(parent_fd, name, 0);
+    errno = saved_errno;
 }
 
 static void _fs_cleanup_created_directory_at(int parent_fd, const char* name)
 {
     /* Best-effort cleanup for a newly-created directory after post-create failure. */
-    if(parent_fd < 0 || !name) return;
-
-    (void)unlinkat(parent_fd, name, AT_REMOVEDIR);
+    int saved_errno = errno;
+    (void)FS_SYS_UNLINKAT(parent_fd, name, AT_REMOVEDIR);
+    errno = saved_errno;
 }
