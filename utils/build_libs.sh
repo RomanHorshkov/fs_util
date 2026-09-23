@@ -351,6 +351,7 @@ build_library_variant() {
     # integration tests' .shared variant (LD_LIBRARY_PATH into this dir)
     # cannot load the library the way a consumer on the box does.
     ln -sfn "libfsutil.so" "${output_dir}/libfsutil.so.${fsutil_major}"
+    ln -sfn "libfsutil.so" "${output_dir}/libfsutil.so.${fsutil_version}"
 
     printf '  creating static library:         %s\n' "${static_library}"
     create_static_archive "${static_library}" "${static_object}"

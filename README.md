@@ -98,17 +98,8 @@ Compatibility wrapper:
 
 Artifact:
 
-- `build/debs/libfsutil_<VERSION>_<ARCH>.deb`
-
-Installed payload:
-
-- `/usr/local/include/fsutil.h`
-- `/usr/local/include/utils/fsutil.h`
-- `/usr/local/lib/libfsutil.so.<VERSION>`
-- `/usr/local/lib/libfsutil.so.<MAJOR>`
-- `/usr/local/lib/libfsutil.so`
-- `/usr/local/lib/libfsutil.a`
-- `/usr/local/lib/pkgconfig/fsutil.pc`
+- `build/debs/libfsutil_<VERSION>_<ARCH>.deb` — runtime: `/usr/local/lib/libfsutil.so.<VERSION>`, `libfsutil.so.<MAJOR>`
+- `build/debs/libfsutil-dev_<VERSION>_<ARCH>.deb` — development: `/usr/local/include/fsutil.h`, `/usr/local/include/utils/fsutil.h`, `/usr/local/lib/libfsutil.a`, `libfsutil.so` linker symlink, `pkgconfig/fsutil.pc`; depends on `libfsutil (= <VERSION>)`
 
 The package includes `postinst` and `postrm` hooks that run `ldconfig`.
 

@@ -1,152 +1,141 @@
 #!/usr/bin/env bash
-
-# Build the fsutil Debian package.
-
+# =============================================================================
+# build_deb.sh — package the release-profile libfsutil artifacts into debs
+#
+# author  Roman Horshkov <github.com/RomanHorshkov>
+# date    2026
+# (c) 2026
+# =============================================================================
+#
+#   libfsutil_<ver>_<arch>.deb      runtime: libfsutil.so.<ver> + soname symlink
+#   libfsutil-dev_<ver>_<arch>.deb  development: fsutil.h (also under include/utils),
+#                                   libfsutil.a, libfsutil.so linker symlink,
+#                                   pkgconfig/fsutil.pc; depends on the exact runtime
+#
+# plus a SHA256SUMS manifest covering both, in build/debs/. The dev package
+# replaces the files older single-package libfsutil versions shipped.
+# =============================================================================
 set -euo pipefail
 
-START_DIR="$(pwd -P)"
-cleanup() { cd -- "${START_DIR}"; }
-trap cleanup EXIT
+ROOT_DIR="${ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+LIB="fsutil"
+PKG_RUNTIME="libfsutil"
+PKG_DEV="libfsutil-dev"
+DESCRIPTION="Strict capability-oriented filesystem helper library"
+STRIP="${STRIP:-strip}"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-cd -- "${ROOT_DIR}"
+die() { printf '%s: %s\n' "${BASH_SOURCE[0]}" "$1" >&2; exit 1; }
 
-if ! command -v dpkg-deb >/dev/null 2>&1; then
-    printf 'dpkg-deb not found in PATH\n' >&2
-    exit 1
-fi
+cd "$ROOT_DIR"
 
-PACKAGE_NAME="${FSUTIL_DEB_PACKAGE_NAME:-libfsutil}"
-PROFILE="${FSUTIL_DEB_PROFILE:-release}"
-VERSION="$(tr -d '[:space:]' < "${ROOT_DIR}/VERSION")"
+VER="$(tr -d '[:space:]' < VERSION)"
+[[ "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "VERSION '${VER}' does not match ^[0-9]+\\.[0-9]+\\.[0-9]+\$"
+
+./utils/build_libs.sh release
+
 ARCH="$(dpkg --print-architecture)"
-STRIP_BIN="${STRIP:-strip}"
-BUILD_DIR="${ROOT_DIR}/build"
-PROFILE_DIR="${BUILD_DIR}/${PROFILE}"
-DEB_WORK_DIR="${BUILD_DIR}/deb"
-OUT_DIR="${BUILD_DIR}/debs"
-STAGE_DIR="${DEB_WORK_DIR}/${PACKAGE_NAME}_${VERSION}_${ARCH}"
-OUT_DEB="${OUT_DIR}/${PACKAGE_NAME}_${VERSION}_${ARCH}.deb"
-SHARED_LIB="${PROFILE_DIR}/libfsutil.so"
-STATIC_LIB="${PROFILE_DIR}/libfsutil.a"
-MAJOR="${VERSION%%.*}"
+IFS='.' read -r MAJOR MINOR PATCH <<< "$VER"
 
-if [[ -z "${VERSION}" ]]; then
-    printf 'VERSION is empty\n' >&2
-    exit 1
-fi
+COPYRIGHT_SRC="${ROOT_DIR}/debian/copyright"
+[[ -f "${COPYRIGHT_SRC}" ]] || die "missing ${COPYRIGHT_SRC} — third-party notices must ship in the deb"
 
-# The deb filename, soname chain, and control file all embed VERSION verbatim.
-# Refuse anything that is not strict MAJOR.MINOR.PATCH.
-if ! [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    printf 'error: VERSION must match MAJOR.MINOR.PATCH (digits only), got: %q\n' "${VERSION}" >&2
-    exit 1
-fi
+OUT_DIR="${OUT_DIR:-${ROOT_DIR}/build/debs}"
+rm -rf "$OUT_DIR"
+install -d -m 0755 "$OUT_DIR"
 
-printf '[deb] building fsutil profile: %s\n' "${PROFILE}"
-"${ROOT_DIR}/utils/build_libs.sh" "${PROFILE}"
+stage_dirs() {
+    local stage="$1"; shift
+    rm -rf "$stage"
+    install -d -m 0755 "$stage" "$stage/DEBIAN" "$stage/usr" "$stage/usr/local" \
+        "$stage/usr/share" "$stage/usr/share/doc"
+    local d
+    for d in "$@"; do install -d -m 0755 "$stage/usr/local/$d"; done
+}
 
-if [[ ! -f "${SHARED_LIB}" ]]; then
-    printf 'missing shared library: %s\n' "${SHARED_LIB}" >&2
-    exit 1
-fi
-if [[ ! -f "${STATIC_LIB}" ]]; then
-    printf 'missing static library: %s\n' "${STATIC_LIB}" >&2
-    exit 1
-fi
+write_ldconfig_hooks() {
+    local stage="$1" hook
+    for hook in postinst postrm; do
+        printf '#!/bin/sh\nset -e\nldconfig\nexit 0\n' > "$stage/DEBIAN/$hook"
+        chmod 0755 "$stage/DEBIAN/$hook"
+    done
+}
 
-rm -rf "${STAGE_DIR}"
-mkdir -p "${STAGE_DIR}/DEBIAN" \
-         "${STAGE_DIR}/usr/local/include/utils" \
-         "${STAGE_DIR}/usr/local/lib" \
-         "${STAGE_DIR}/usr/local/lib/pkgconfig"
+# --- runtime package -----------------------------------------------------------
+STAGE_RT="${ROOT_DIR}/build/pkgroot/${PKG_RUNTIME}"
+stage_dirs "$STAGE_RT" lib
+LIB_RT="$STAGE_RT/usr/local/lib"
 
-install -m 0644 "${ROOT_DIR}/app/fsutil.h" "${STAGE_DIR}/usr/local/include/fsutil.h"
-install -m 0644 "${ROOT_DIR}/app/fsutil.h" "${STAGE_DIR}/usr/local/include/utils/fsutil.h"
+install -m 0755 "build/release/lib${LIB}.so.$VER" "$LIB_RT/lib${LIB}.so.$VER"
+"$STRIP" --strip-unneeded "$LIB_RT/lib${LIB}.so.$VER"
+ln -sf "lib${LIB}.so.$VER" "$LIB_RT/lib${LIB}.so.$MAJOR"
 
-install -m 0755 "${SHARED_LIB}" "${STAGE_DIR}/usr/local/lib/libfsutil.so.${VERSION}"
-if command -v "${STRIP_BIN}" >/dev/null 2>&1; then
-    "${STRIP_BIN}" --strip-unneeded "${STAGE_DIR}/usr/local/lib/libfsutil.so.${VERSION}"
-fi
-ln -sfn "libfsutil.so.${VERSION}" "${STAGE_DIR}/usr/local/lib/libfsutil.so.${MAJOR}"
-ln -sfn "libfsutil.so.${VERSION}" "${STAGE_DIR}/usr/local/lib/libfsutil.so"
-install -m 0644 "${STATIC_LIB}" "${STAGE_DIR}/usr/local/lib/libfsutil.a"
+"${ROOT_DIR}/utils/check_hardening.sh" "$LIB_RT/lib${LIB}.so.$VER"
 
-cat > "${STAGE_DIR}/usr/local/lib/pkgconfig/fsutil.pc" <<PC
+cat > "$STAGE_RT/DEBIAN/control" <<EOF
+Package: $PKG_RUNTIME
+Version: $VER
+Section: libs
+Priority: optional
+Architecture: $ARCH
+Depends: libc6
+Maintainer: Roman Horshkov <https://github.com/RomanHorshkov>
+Description: $DESCRIPTION
+EOF
+write_ldconfig_hooks "$STAGE_RT"
+
+install -d -m 0755 "${STAGE_RT}/usr/share/doc/${PKG_RUNTIME}"
+install -m 0644 "${COPYRIGHT_SRC}" "${STAGE_RT}/usr/share/doc/${PKG_RUNTIME}/copyright"
+DEB_RT="${PKG_RUNTIME}_${VER}_${ARCH}.deb"
+fakeroot dpkg-deb --build "$STAGE_RT" "$OUT_DIR/$DEB_RT"
+
+# --- development package --------------------------------------------------------
+STAGE_DEV="${ROOT_DIR}/build/pkgroot/${PKG_DEV}"
+stage_dirs "$STAGE_DEV" lib lib/pkgconfig include include/utils
+LIB_DEV="$STAGE_DEV/usr/local/lib"
+
+install -m 0644 "app/${LIB}.h" "$STAGE_DEV/usr/local/include/${LIB}.h"
+install -m 0644 "app/${LIB}.h" "$STAGE_DEV/usr/local/include/utils/${LIB}.h"
+install -m 0644 "build/release/lib${LIB}.a" "$LIB_DEV/lib${LIB}.a"
+ln -sf "lib${LIB}.so.$VER" "$LIB_DEV/lib${LIB}.so"
+
+cat > "$LIB_DEV/pkgconfig/${LIB}.pc" <<EOF
 prefix=/usr/local
 exec_prefix=\${prefix}
 libdir=\${exec_prefix}/lib
 includedir=\${prefix}/include
 utilsincludedir=\${includedir}/utils
 
-Name: fsutil
-Description: Strict capability-oriented filesystem helper library
-Version: ${VERSION}
-Libs: -L\${libdir} -lfsutil
+Name: ${LIB}
+Description: ${DESCRIPTION}
+Version: ${VER}
+Libs: -L\${libdir} -l${LIB}
 Cflags: -I\${includedir} -I\${utilsincludedir}
-PC
+EOF
+chmod 0644 "$LIB_DEV/pkgconfig/${LIB}.pc"
 
-cat > "${STAGE_DIR}/DEBIAN/control" <<CTRL
-Package: ${PACKAGE_NAME}
-Version: ${VERSION}
-Section: libs
+cat > "$STAGE_DEV/DEBIAN/control" <<EOF
+Package: $PKG_DEV
+Version: $VER
+Section: libdevel
 Priority: optional
-Architecture: ${ARCH}
-Maintainer: ${DEB_MAINTAINER:-Roman Horshkov <124358264+RomanHorshkov@users.noreply.github.com>}
-Depends: libc6
-Description: fsutil capability-oriented filesystem helper library
- fsutil is a C helper library for dirfd-based filesystem operations, strict
- component validation, explicit metadata verification, and explicit durability
- barriers. It installs libraries under /usr/local/lib and headers under both
- /usr/local/include and /usr/local/include/utils.
-CTRL
+Architecture: $ARCH
+Depends: $PKG_RUNTIME (= $VER)
+Breaks: $PKG_RUNTIME (<< $VER)
+Replaces: $PKG_RUNTIME (<< $VER)
+Maintainer: Roman Horshkov <https://github.com/RomanHorshkov>
+Description: Development files for $PKG_RUNTIME (headers, static library, linker symlink, pkg-config)
+EOF
 
-cat > "${STAGE_DIR}/DEBIAN/postinst" <<'POSTINST'
-#!/bin/sh
-set -e
-ldconfig
-exit 0
-POSTINST
-chmod 0755 "${STAGE_DIR}/DEBIAN/postinst"
+install -d -m 0755 "${STAGE_DEV}/usr/share/doc/${PKG_DEV}"
+install -m 0644 "${COPYRIGHT_SRC}" "${STAGE_DEV}/usr/share/doc/${PKG_DEV}/copyright"
+DEB_DEV="${PKG_DEV}_${VER}_${ARCH}.deb"
+fakeroot dpkg-deb --build "$STAGE_DEV" "$OUT_DIR/$DEB_DEV"
 
-cat > "${STAGE_DIR}/DEBIAN/postrm" <<'POSTRM'
-#!/bin/sh
-set -e
-ldconfig
-exit 0
-POSTRM
-chmod 0755 "${STAGE_DIR}/DEBIAN/postrm"
+(
+    cd "$OUT_DIR"
+    sha256sum -- *.deb > SHA256SUMS
+)
 
-find "${STAGE_DIR}" -type d -exec chmod 0755 {} +
-find "${STAGE_DIR}" -type f -name '*.h' -exec chmod 0644 {} +
-find "${STAGE_DIR}" -type f -name '*.a' -exec chmod 0644 {} +
-find "${STAGE_DIR}" -type f -name '*.pc' -exec chmod 0644 {} +
-
-# Verify the staged (stripped) payload still carries the release hardening
-# before it gets sealed into a package. A red check kills the build here.
-"${ROOT_DIR}/utils/check_hardening.sh" \
-    "${STAGE_DIR}/usr/local/lib/libfsutil.so.${VERSION}"
-
-# Ship the DEP-5 copyright file (first-party terms + every third-party notice)
-# at /usr/share/doc/<pkg>/copyright (Debian Policy 12.5). A missing file is a
-# build error: a binary must never leave without its notices.
-COPYRIGHT_SRC="${ROOT_DIR}/debian/copyright"
-[[ -f "${COPYRIGHT_SRC}" ]] || { printf 'missing %s — third-party notices must ship in the deb\n' "${COPYRIGHT_SRC}" >&2; exit 1; }
-install -d -m 0755 "${STAGE_DIR}/usr/share" "${STAGE_DIR}/usr/share/doc" "${STAGE_DIR}/usr/share/doc/${PACKAGE_NAME}"
-install -m 0644 "${COPYRIGHT_SRC}" "${STAGE_DIR}/usr/share/doc/${PACKAGE_NAME}/copyright"
-mkdir -p "${OUT_DIR}"
-# Keep build/debs single-valued: a stale package from an older VERSION must never ride
-# along into SHA256SUMS or a release bundle assembled from this directory.
-rm -f "${OUT_DIR}/${PACKAGE_NAME}_"*.deb "${OUT_DIR}/SHA256SUMS"
-dpkg-deb --build --root-owner-group "${STAGE_DIR}" "${OUT_DEB}"
-
-# Refresh checksums next to the deb(s) so consumers can verify what they fetch.
-(cd "${OUT_DIR}" && sha256sum -- *.deb > SHA256SUMS)
-printf '[deb] checksums refreshed: %s\n' "${OUT_DIR}/SHA256SUMS"
-
-printf '\nBuilt complete\n'
-printf '  package: %s\n' "${OUT_DEB}"
-printf '  info:    dpkg-deb -I %s\n' "${OUT_DEB}"
-printf '  list:    dpkg-deb -c %s\n' "${OUT_DEB}"
-printf '  check:   dpkg --dry-run -i %s\n' "${OUT_DEB}"
+printf '\nBuilt:\n  %s\n  %s\n' "$OUT_DIR/$DEB_RT" "$OUT_DIR/$DEB_DEV"
+printf 'checksums: %s/SHA256SUMS\n' "$OUT_DIR"
+printf 'install with: sudo apt install %s/%s %s/%s\n' "$OUT_DIR" "$DEB_RT" "$OUT_DIR" "$DEB_DEV"
