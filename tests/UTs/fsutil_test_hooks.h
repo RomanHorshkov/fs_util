@@ -16,6 +16,7 @@
 #ifndef FSUTIL_TEST_HOOKS_H
 #define FSUTIL_TEST_HOOKS_H
 
+#include <stddef.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 
@@ -29,6 +30,11 @@ typedef struct fs_test_hooks
     int (*fstat)(int fd, struct stat* st);
     int (*fcntl)(int fd, int cmd, int arg);
     int (*fsync)(int fd);
+    int (*fdatasync)(int fd);
+    ssize_t (*read)(int fd, void* buf, size_t len);
+    ssize_t (*write)(int fd, const void* buf, size_t len);
+    ssize_t (*pread)(int fd, void* buf, size_t len, off_t offset);
+    ssize_t (*pwrite)(int fd, const void* buf, size_t len, off_t offset);
     int (*renameat)(int old_dirfd, const char* old_name, int new_dirfd, const char* new_name);
     int (*renameat2)(int old_dirfd, const char* old_name, int new_dirfd, const char* new_name, unsigned int flags);
     int (*unlinkat)(int dirfd, const char* name, int flags);

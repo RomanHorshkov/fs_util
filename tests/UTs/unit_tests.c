@@ -313,6 +313,53 @@ static int hook_fsync_fail(int fd)
     errno = g_fail_errno;
     return -1;
 }
+static int hook_fsync_eintr_once(int fd)
+{
+    if(counted_failure()) return -1;
+    return fsync(fd);
+}
+static int hook_fdatasync_eintr_once(int fd)
+{
+    if(counted_failure()) return -1;
+    return fdatasync(fd);
+}
+/* One byte per call: the transfer loops must keep going until the whole buffer is done. */
+static ssize_t hook_write_one_byte(int fd, const void* buf, size_t len)
+{
+    if(counted_failure()) return -1;
+    return write(fd, buf, len > 0 ? 1 : 0);
+}
+static ssize_t hook_pwrite_one_byte(int fd, const void* buf, size_t len, off_t offset)
+{
+    if(counted_failure()) return -1;
+    return pwrite(fd, buf, len > 0 ? 1 : 0, offset);
+}
+static ssize_t hook_read_one_byte(int fd, void* buf, size_t len)
+{
+    if(counted_failure()) return -1;
+    return read(fd, buf, len > 0 ? 1 : 0);
+}
+static ssize_t hook_pread_one_byte(int fd, void* buf, size_t len, off_t offset)
+{
+    if(counted_failure()) return -1;
+    return pread(fd, buf, len > 0 ? 1 : 0, offset);
+}
+/* A descriptor that accepts nothing: the loops must report it, not spin. */
+static ssize_t hook_write_zero(int fd, const void* buf, size_t len)
+{
+    (void)fd;
+    (void)buf;
+    (void)len;
+    return 0;
+}
+static ssize_t hook_pwrite_zero(int fd, const void* buf, size_t len, off_t offset)
+{
+    (void)fd;
+    (void)buf;
+    (void)len;
+    (void)offset;
+    return 0;
+}
 static int hook_renameat_fail(int ofd, const char* oname, int nfd, const char* nname)
 {
     (void)ofd;
@@ -328,6 +375,14 @@ static int hook_renameat2_fail(int ofd, const char* oname, int nfd, const char* 
     (void)oname;
     (void)nfd;
     (void)nname;
+    (void)flags;
+    errno = g_fail_errno;
+    return -1;
+}
+static int hook_unlinkat_fail(int dirfd, const char* name, int flags)
+{
+    (void)dirfd;
+    (void)name;
     (void)flags;
     errno = g_fail_errno;
     return -1;
@@ -400,6 +455,14 @@ static void test_component_is_valid(void** state)
     assert_int_equal(fs_component_is_valid("..."), 1);
     assert_int_equal(fs_component_is_valid(".hidden"), 1);
     assert_int_equal(fs_component_is_valid("name"), 1);
+
+    /* Control characters are refused; spaces and UTF-8 are not. */
+    assert_int_equal(fs_component_is_valid("a\nb"), 0);
+    assert_int_equal(fs_component_is_valid("a\tb"), 0);
+    assert_int_equal(fs_component_is_valid("\x01"), 0);
+    assert_int_equal(fs_component_is_valid("a\x7f"), 0);
+    assert_int_equal(fs_component_is_valid("a b"), 1);
+    assert_int_equal(fs_component_is_valid("caf\xc3\xa9"), 1);
 }
 
 /*****************************************************************************************************************************************
@@ -1014,6 +1077,27 @@ static void test_rename_and_unlink(void** state)
 
     fs_dir_close(&not_a_dir);
     fs_dir_close(&sub);
+
+    /* fs_rmdir_at: single empty directory only, never through a symlink. */
+    make_dir(&env->root, "empty", 0700);
+    make_dir(&env->root, "full", 0700);
+    make_file(&env->root, "full/x", 0600);
+    make_symlink(&env->root, "lnk", "empty");
+    assert_int_equal(fs_rmdir_at(NULL, "empty"), -EINVAL);
+    assert_int_equal(fs_rmdir_at(&closed, "empty"), -EINVAL);
+    assert_int_equal(fs_rmdir_at(&env->root, "a/b"), -EINVAL);
+    assert_int_equal(fs_rmdir_at(&env->root, ".."), -EINVAL);
+    fs_dir_t file_handle = {.fd = openat(env->root.fd, "f", O_RDONLY | O_CLOEXEC)};
+    assert_int_equal(fs_rmdir_at(&file_handle, "empty"), -ENOTDIR);
+    fs_dir_close(&file_handle);
+    assert_int_equal(fs_rmdir_at(&env->root, "missing"), -ENOENT);
+    assert_int_equal(fs_rmdir_at(&env->root, "f"), -ENOTDIR);
+    assert_int_equal(fs_rmdir_at(&env->root, "lnk"), -ENOTDIR);
+    assert_true(entry_exists(&env->root, "empty")); /* the link's target is untouched */
+    int rc_full = fs_rmdir_at(&env->root, "full");
+    assert_true(rc_full == -ENOTEMPTY || rc_full == -EEXIST);
+    assert_int_equal(fs_rmdir_at(&env->root, "empty"), 0);
+    assert_false(entry_exists(&env->root, "empty"));
 }
 
 static void test_fsync_helpers(void** state)
@@ -1032,7 +1116,73 @@ static void test_fsync_helpers(void** state)
     assert_int_equal(fs_file_fsync(-1), -EINVAL);
     assert_int_equal(fs_file_fsync(env->root.fd), -EISDIR);
     assert_int_equal(fs_file_fsync(fd), 0);
+    assert_int_equal(fs_file_fdatasync(-1), -EINVAL);
+    assert_int_equal(fs_file_fdatasync(env->root.fd), -EISDIR);
+    assert_int_equal(fs_file_fdatasync(fd), 0);
     (void)close(fd);
+}
+
+static void test_file_io_all(void** state)
+{
+    test_env_t* env = *state;
+    char        buf[32];
+    int         fd = -1;
+
+    assert_int_equal(fs_file_create_write_new_at(&env->root, "io", 0600, NULL, &fd), 0);
+
+    /* Argument contracts, identical across the four helpers. */
+    assert_int_equal(fs_file_write_all(-1, "x", 1), -EINVAL);
+    assert_int_equal(fs_file_write_all(fd, NULL, 1), -EINVAL);
+    assert_int_equal(fs_file_write_all(fd, "x", (size_t)SSIZE_MAX + 1U), -EINVAL);
+    assert_int_equal(fs_file_pwrite_all(-1, "x", 1, 0), -EINVAL);
+    assert_int_equal(fs_file_pwrite_all(fd, NULL, 1, 0), -EINVAL);
+    assert_int_equal(fs_file_pwrite_all(fd, "x", (size_t)SSIZE_MAX + 1U, 0), -EINVAL);
+    assert_int_equal(fs_file_pwrite_all(fd, "x", 1, -1), -EINVAL);
+    assert_int_equal(fs_file_read_all(-1, buf, 1), -EINVAL);
+    assert_int_equal(fs_file_read_all(fd, NULL, 1), -EINVAL);
+    assert_int_equal(fs_file_read_all(fd, buf, (size_t)SSIZE_MAX + 1U), -EINVAL);
+    assert_int_equal(fs_file_pread_all(-1, buf, 1, 0), -EINVAL);
+    assert_int_equal(fs_file_pread_all(fd, NULL, 1, 0), -EINVAL);
+    assert_int_equal(fs_file_pread_all(fd, buf, (size_t)SSIZE_MAX + 1U, 0), -EINVAL);
+    assert_int_equal(fs_file_pread_all(fd, buf, 1, -1), -EINVAL);
+
+    /* Zero-length transfers are no-ops, even with a null buffer. */
+    assert_int_equal(fs_file_write_all(fd, NULL, 0), 0);
+    assert_int_equal(fs_file_pwrite_all(fd, NULL, 0, 0), 0);
+    assert_int_equal(fs_file_read_all(fd, NULL, 0), 0);
+    assert_int_equal(fs_file_pread_all(fd, NULL, 0, 0), 0);
+
+    /* Sequential write, positional overwrite, then both read forms see the same bytes. */
+    assert_int_equal(fs_file_write_all(fd, "hello world", 11), 0);
+    assert_int_equal(fs_file_pwrite_all(fd, "WORLD", 5, 6), 0);
+    assert_int_equal(fs_file_read_all(fd, buf, 1), -EBADF); /* fd is write-only */
+    (void)close(fd);
+
+    assert_int_equal(fs_file_open_rw_at(&env->root, "io", NULL, &fd), 0);
+    memset(buf, 0, sizeof(buf));
+    assert_int_equal(fs_file_read_all(fd, buf, 11), 0);
+    assert_memory_equal(buf, "hello WORLD", 11);
+    memset(buf, 0, sizeof(buf));
+    assert_int_equal(fs_file_pread_all(fd, buf, 5, 6), 0);
+    assert_memory_equal(buf, "WORLD", 5);
+
+    /* End of file before the request is satisfied is an error, never a short count. */
+    assert_int_equal(fs_file_read_all(fd, buf, 1), -ENODATA);
+    assert_int_equal(fs_file_pread_all(fd, buf, 6, 6), -ENODATA);
+    assert_int_equal(fs_file_pread_all(fd, buf, 1, 11), -ENODATA);
+    (void)close(fd);
+
+    /* Positional I/O on a pipe is refused by the kernel; the error propagates as is. */
+    int pfd[2];
+    assert_int_equal(pipe(pfd), 0);
+    assert_int_equal(fs_file_pwrite_all(pfd[1], "x", 1, 0), -ESPIPE);
+    assert_int_equal(fs_file_pread_all(pfd[0], buf, 1, 0), -ESPIPE);
+    assert_int_equal(fs_file_write_all(pfd[1], "pipe", 4), 0);
+    assert_int_equal(fs_file_read_all(pfd[0], buf, 4), 0);
+    assert_memory_equal(buf, "pipe", 4);
+    (void)close(pfd[1]);
+    assert_int_equal(fs_file_read_all(pfd[0], buf, 1), -ENODATA);
+    (void)close(pfd[0]);
 }
 
 /*****************************************************************************************************************************************
@@ -1241,6 +1391,97 @@ static void test_fault_rename_unlink_fsync(void** state)
     assert_true(fd >= 0);
     g_fail_errno = EIO;
     assert_int_equal(fs_file_fsync(fd), -EIO);
+    fs_test_hooks.fdatasync = hook_fsync_fail;
+    assert_int_equal(fs_file_fdatasync(fd), -EIO);
+    fs_test_hooks_reset();
+
+    /* A signal during a barrier is retried, not reported. */
+    fs_test_hooks.fsync = hook_fsync_eintr_once;
+    arm_failure(1, EINTR);
+    assert_int_equal(fs_file_fsync(fd), 0);
+    arm_failure(1, EINTR);
+    assert_int_equal(fs_dir_fsync(&env->root), 0);
+    fs_test_hooks.fdatasync = hook_fdatasync_eintr_once;
+    arm_failure(1, EINTR);
+    assert_int_equal(fs_file_fdatasync(fd), 0);
+    fs_test_hooks_reset();
+    (void)close(fd);
+
+    /* rmdir failure propagates. */
+    make_dir(&env->root, "d", 0700);
+    fs_test_hooks.unlinkat = hook_unlinkat_fail;
+    g_fail_errno           = EBUSY;
+    assert_int_equal(fs_rmdir_at(&env->root, "d"), -EBUSY);
+    fs_test_hooks_reset();
+    assert_true(entry_exists(&env->root, "d"));
+}
+
+static void test_fault_eintr_opens(void** state)
+{
+    test_env_t* env = *state;
+    fs_dir_t    d;
+    int         fd = -1;
+    fs_dir_init(&d);
+    make_dir(&env->root, "sub", 0700);
+    make_file(&env->root, "f", 0600);
+
+    /* A signal during open()/openat() is retried; the caller sees success. */
+    fs_test_hooks.open = hook_open_fail;
+    arm_failure(1, EINTR);
+    assert_int_equal(fs_dir_open_cwd(&d), 0);
+    fs_dir_close(&d);
+    fs_test_hooks.openat = hook_openat_fail;
+    arm_failure(1, EINTR);
+    assert_int_equal(fs_dir_open_at(&env->root, "sub", NULL, &d), 0);
+    fs_dir_close(&d);
+    arm_failure(1, EINTR);
+    assert_int_equal(fs_file_open_read_at(&env->root, "f", NULL, &fd), 0);
+    (void)close(fd);
+    fs_test_hooks_reset();
+}
+
+static void test_fault_file_io_all(void** state)
+{
+    test_env_t* env = *state;
+    char        buf[16];
+    int         fd = -1;
+    make_file(&env->root, "f", 0600);
+    fd = openat(env->root.fd, "f", O_RDWR | O_CLOEXEC);
+    assert_true(fd >= 0);
+
+    /* Short transfers: one byte per call, with one EINTR in the middle, still complete. */
+    fs_test_hooks.write  = hook_write_one_byte;
+    fs_test_hooks.pwrite = hook_pwrite_one_byte;
+    fs_test_hooks.read   = hook_read_one_byte;
+    fs_test_hooks.pread  = hook_pread_one_byte;
+    arm_failure(3, EINTR);
+    assert_int_equal(fs_file_write_all(fd, "0123456789", 10), 0);
+    arm_failure(3, EINTR);
+    assert_int_equal(fs_file_pwrite_all(fd, "abcde", 5, 2), 0);
+    assert_int_equal(lseek(fd, 0, SEEK_SET), 0);
+    arm_failure(3, EINTR);
+    assert_int_equal(fs_file_read_all(fd, buf, 10), 0);
+    assert_memory_equal(buf, "01abcde789", 10);
+    arm_failure(3, EINTR);
+    assert_int_equal(fs_file_pread_all(fd, buf, 5, 2), 0);
+    assert_memory_equal(buf, "abcde", 5);
+
+    /* A real error is reported as is. */
+    arm_failure(2, EIO);
+    assert_int_equal(fs_file_write_all(fd, "xy", 2), -EIO);
+    arm_failure(2, EIO);
+    assert_int_equal(fs_file_pwrite_all(fd, "xy", 2, 0), -EIO);
+    assert_int_equal(lseek(fd, 0, SEEK_SET), 0);
+    arm_failure(2, EIO);
+    assert_int_equal(fs_file_read_all(fd, buf, 2), -EIO);
+    arm_failure(2, EIO);
+    assert_int_equal(fs_file_pread_all(fd, buf, 2, 0), -EIO);
+
+    /* A descriptor that accepts nothing is an error, not an endless loop. */
+    fs_test_hooks.write  = hook_write_zero;
+    fs_test_hooks.pwrite = hook_pwrite_zero;
+    assert_int_equal(fs_file_write_all(fd, "x", 1), -EIO);
+    assert_int_equal(fs_file_pwrite_all(fd, "x", 1, 0), -EIO);
     fs_test_hooks_reset();
     (void)close(fd);
 }
@@ -1270,6 +1511,7 @@ int main(void)
         cmocka_unit_test_setup_teardown(test_file_create_write_new_at, env_setup, env_teardown),
         cmocka_unit_test_setup_teardown(test_rename_and_unlink, env_setup, env_teardown),
         cmocka_unit_test_setup_teardown(test_fsync_helpers, env_setup, env_teardown),
+        cmocka_unit_test_setup_teardown(test_file_io_all, env_setup, env_teardown),
 #ifdef FS_UTIL_TESTING
         cmocka_unit_test_setup_teardown(test_fault_root_opens, env_setup, env_teardown),
         cmocka_unit_test_setup_teardown(test_fault_verify, env_setup, env_teardown),
@@ -1277,6 +1519,8 @@ int main(void)
         cmocka_unit_test_setup_teardown(test_fault_walks, env_setup, env_teardown),
         cmocka_unit_test_setup_teardown(test_fault_file_opens, env_setup, env_teardown),
         cmocka_unit_test_setup_teardown(test_fault_rename_unlink_fsync, env_setup, env_teardown),
+        cmocka_unit_test_setup_teardown(test_fault_eintr_opens, env_setup, env_teardown),
+        cmocka_unit_test_setup_teardown(test_fault_file_io_all, env_setup, env_teardown),
 #endif
     };
 

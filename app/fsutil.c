@@ -28,7 +28,7 @@
 #include <limits.h> /* NAME_MAX */
 #include <stdio.h>  /* renameat, renameat2, RENAME_NOREPLACE */
 #include <string.h> /* memcpy, strcmp, strchr */
-#include <unistd.h> /* close, fsync, unlinkat, fchmod, fchmodat, fstat, geteuid, getegid */
+#include <unistd.h> /* close, fsync, fdatasync, read, write, pread, pwrite, unlinkat, fchmod, fchmodat, fstat, geteuid, getegid */
 
 /*****************************************************************************************************************************************
  * PRIVATE DEFINES
@@ -56,6 +56,11 @@
 #    define FS_SYS_FSTAT(fd, st)                            (fs_test_hooks.fstat((fd), (st)))
 #    define FS_SYS_FCNTL(fd, cmd, arg)                      (fs_test_hooks.fcntl((fd), (cmd), (arg)))
 #    define FS_SYS_FSYNC(fd)                                (fs_test_hooks.fsync((fd)))
+#    define FS_SYS_FDATASYNC(fd)                            (fs_test_hooks.fdatasync((fd)))
+#    define FS_SYS_READ(fd, buf, len)                       (fs_test_hooks.read((fd), (buf), (len)))
+#    define FS_SYS_WRITE(fd, buf, len)                      (fs_test_hooks.write((fd), (buf), (len)))
+#    define FS_SYS_PREAD(fd, buf, len, off)                 (fs_test_hooks.pread((fd), (buf), (len), (off)))
+#    define FS_SYS_PWRITE(fd, buf, len, off)                (fs_test_hooks.pwrite((fd), (buf), (len), (off)))
 #    define FS_SYS_RENAMEAT(ofd, oname, nfd, nname)         (fs_test_hooks.renameat((ofd), (oname), (nfd), (nname)))
 #    define FS_SYS_RENAMEAT2(ofd, oname, nfd, nname, flags) (fs_test_hooks.renameat2((ofd), (oname), (nfd), (nname), (flags)))
 #    define FS_SYS_UNLINKAT(dirfd, name, flags)             (fs_test_hooks.unlinkat((dirfd), (name), (flags)))
@@ -68,6 +73,11 @@
 #    define FS_SYS_FSTAT(fd, st)                            fstat((fd), (st))
 #    define FS_SYS_FCNTL(fd, cmd, arg)                      fcntl((fd), (cmd), (arg))
 #    define FS_SYS_FSYNC(fd)                                fsync((fd))
+#    define FS_SYS_FDATASYNC(fd)                            fdatasync((fd))
+#    define FS_SYS_READ(fd, buf, len)                       read((fd), (buf), (len))
+#    define FS_SYS_WRITE(fd, buf, len)                      write((fd), (buf), (len))
+#    define FS_SYS_PREAD(fd, buf, len, off)                 pread((fd), (buf), (len), (off))
+#    define FS_SYS_PWRITE(fd, buf, len, off)                pwrite((fd), (buf), (len), (off))
 #    define FS_SYS_RENAMEAT(ofd, oname, nfd, nname)         renameat((ofd), (oname), (nfd), (nname))
 #    define FS_SYS_RENAMEAT2(ofd, oname, nfd, nname, flags) renameat2((ofd), (oname), (nfd), (nname), (flags))
 #    define FS_SYS_UNLINKAT(dirfd, name, flags)             unlinkat((dirfd), (name), (flags))
@@ -148,6 +158,11 @@ fs_test_hooks_t fs_test_hooks = {
     .fstat     = fstat,
     .fcntl     = _fs_default_fcntl,
     .fsync     = fsync,
+    .fdatasync = fdatasync,
+    .read      = read,
+    .write     = write,
+    .pread     = pread,
+    .pwrite    = pwrite,
     .renameat  = renameat,
     .renameat2 = _fs_default_renameat2,
     .unlinkat  = unlinkat,
@@ -163,6 +178,11 @@ void fs_test_hooks_reset(void)
     fs_test_hooks.fstat     = fstat;
     fs_test_hooks.fcntl     = _fs_default_fcntl;
     fs_test_hooks.fsync     = fsync;
+    fs_test_hooks.fdatasync = fdatasync;
+    fs_test_hooks.read      = read;
+    fs_test_hooks.write     = write;
+    fs_test_hooks.pread     = pread;
+    fs_test_hooks.pwrite    = pwrite;
     fs_test_hooks.renameat  = renameat;
     fs_test_hooks.renameat2 = _fs_default_renameat2;
     fs_test_hooks.unlinkat  = unlinkat;
@@ -173,6 +193,32 @@ void fs_test_hooks_reset(void)
  * PRIVATE FUNCTIONS PROTOTYPES
  *****************************************************************************************************************************************
  */
+
+/**
+ * @brief open() that retries when a signal interrupts it.
+ *
+ * A blocking open on a FUSE or network filesystem may return EINTR; local
+ * filesystems never do. Retrying is always safe: no fd was created.
+ */
+static int _fs_open_eintr(const char* path, int flags);
+
+/**
+ * @brief openat() that retries when a signal interrupts it. See _fs_open_eintr().
+ */
+static int _fs_openat_eintr(int dirfd, const char* name, int flags, mode_t mode);
+
+/**
+ * @brief fsync() that retries when a signal interrupts it.
+ *
+ * Only EINTR is retried. Any other failure is reported once by the kernel and
+ * is final; see fs_file_fsync().
+ */
+static int _fs_fsync_eintr(int fd);
+
+/**
+ * @brief fdatasync() that retries when a signal interrupts it. See _fs_fsync_eintr().
+ */
+static int _fs_fdatasync_eintr(int fd);
 
 /**
  * @brief Verify that fd has FD_CLOEXEC set.
@@ -333,8 +379,13 @@ int fs_component_is_valid(const char* name)
     if(strcmp(name, ".") == 0) return 0;
     if(strcmp(name, "..") == 0) return 0;
 
-    /* Single-component helpers reject '/' entirely. */
-    return strchr(name, '/') == NULL ? 1 : 0;
+    /* Single-component helpers reject '/' entirely, and control characters:
+     * legal on POSIX, never needed by a database, and poison for logs and tooling. */
+    for(const unsigned char* p = (const unsigned char*)name; *p != '\0'; ++p)
+    {
+        if(*p == '/' || *p < 0x20U || *p == 0x7FU) return 0;
+    }
+    return 1;
 }
 
 int fs_dir_open_cwd(fs_dir_t* out_dir)
@@ -344,7 +395,7 @@ int fs_dir_open_cwd(fs_dir_t* out_dir)
     if(out_dir->fd != -1) return -EBUSY;
 
     /* Bootstrap a capability from the current working directory. */
-    int fd = FS_SYS_OPEN(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    int fd = _fs_open_eintr(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if(fd < 0) return -errno;
 
     /* Transfer ownership of the opened fd to the output handle. */
@@ -368,7 +419,7 @@ int fs_dir_open_abs(const char* abs_path, const fs_expect_t* expect, fs_dir_t* o
     /* Bootstrap a capability from an absolute directory root. O_NOFOLLOW
      * rejects a symlink at the final component; the trusted parent chain is
      * resolved normally. */
-    int fd = FS_SYS_OPEN(abs_path, FS_DIR_OPEN_FLAGS);
+    int fd = _fs_open_eintr(abs_path, FS_DIR_OPEN_FLAGS);
     if(fd < 0) return -errno;
 
     /* Apply the same verification the *at helpers apply after open. */
@@ -396,7 +447,7 @@ int fs_dir_open_abs_nofollow(const char* abs_path, const fs_expect_t* expect, fs
     /* Start from the filesystem root; from here on every component is opened with
      * O_NOFOLLOW by the shared walker, so a symlink ANYWHERE in the chain is refused,
      * not only at the final component as in fs_dir_open_abs(). */
-    int root_fd = FS_SYS_OPEN("/", FS_DIR_OPEN_FLAGS);
+    int root_fd = _fs_open_eintr("/", FS_DIR_OPEN_FLAGS);
     if(root_fd < 0) return -errno;
 
     int    final_fd = -1;
@@ -477,7 +528,7 @@ int fs_dir_open_at(const fs_dir_t* parent, const char* name, const fs_expect_t* 
     if(rc != 0) return rc;
 
     /* Open exactly one child directory, rejecting a final symlink. */
-    int fd = FS_SYS_OPENAT(parent->fd, name, FS_DIR_OPEN_FLAGS, 0);
+    int fd = _fs_openat_eintr(parent->fd, name, FS_DIR_OPEN_FLAGS, 0);
     if(fd < 0) return -errno;
 
     /* Verify the opened child before returning its capability. */
@@ -543,7 +594,7 @@ int fs_dir_create_at(const fs_dir_t* parent, const char* name, mode_t create_mod
     }
 
     /* Open the resulting directory capability, rejecting a final symlink. */
-    int fd = FS_SYS_OPENAT(parent->fd, name, FS_DIR_OPEN_FLAGS, 0);
+    int fd = _fs_openat_eintr(parent->fd, name, FS_DIR_OPEN_FLAGS, 0);
     if(fd < 0)
     {
         int saved_errno = errno;
@@ -672,7 +723,7 @@ int fs_file_create_write_new_at(const fs_dir_t* parent, const char* name, mode_t
     if(rc != 0) return rc;
 
     /* Create a brand-new child file, rejecting a final symlink and avoiding controlling-terminal side effects. */
-    int fd = FS_SYS_OPENAT(parent->fd, name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW | O_NOCTTY, create_mode);
+    int fd = _fs_openat_eintr(parent->fd, name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW | O_NOCTTY, create_mode);
     if(fd < 0) return -errno;
 
     /*
@@ -763,6 +814,21 @@ int fs_unlink_at(const fs_dir_t* parent, const char* name)
     return 0;
 }
 
+int fs_rmdir_at(const fs_dir_t* parent, const char* name)
+{
+    /* Check input. */
+    if(!parent || parent->fd < 0) return -EINVAL;
+    if(!fs_component_is_valid(name)) return -EINVAL;
+
+    /* Parent must already be a valid directory capability. */
+    int rc = fs_dir_verify(parent, NULL);
+    if(rc != 0) return rc;
+
+    /* Remove exactly one empty child directory; a symlink to a directory is -ENOTDIR. */
+    if(FS_SYS_UNLINKAT(parent->fd, name, AT_REMOVEDIR) != 0) return -errno;
+    return 0;
+}
+
 int fs_dir_fsync(const fs_dir_t* dir)
 {
     /* Check input. */
@@ -770,7 +836,7 @@ int fs_dir_fsync(const fs_dir_t* dir)
     if(rc != 0) return rc;
 
     /* Some filesystems do not support directory fsync; treat EINVAL as success. */
-    if(FS_SYS_FSYNC(dir->fd) == 0) return 0;
+    if(_fs_fsync_eintr(dir->fd) == 0) return 0;
     if(errno == EINVAL) return 0;
     return -errno;
 }
@@ -782,7 +848,110 @@ int fs_file_fsync(int fd)
     if(rc != 0) return rc;
 
     /* Push regular-file data and metadata to stable storage. */
-    if(FS_SYS_FSYNC(fd) != 0) return -errno;
+    if(_fs_fsync_eintr(fd) != 0) return -errno;
+    return 0;
+}
+
+int fs_file_fdatasync(int fd)
+{
+    /* Check input. */
+    int rc = fs_file_verify(fd, NULL);
+    if(rc != 0) return rc;
+
+    /* Push regular-file data, and only the metadata needed to read it back, to stable storage. */
+    if(_fs_fdatasync_eintr(fd) != 0) return -errno;
+    return 0;
+}
+
+int fs_file_write_all(int fd, const void* buf, size_t len)
+{
+    /* Check input. A null buffer is only acceptable for a zero-length write. */
+    if(fd < 0 || (!buf && len > 0) || len > (size_t)SSIZE_MAX) return -EINVAL;
+
+    /* Loop until every byte is accepted: write() may transfer less than asked. */
+    const unsigned char* p = buf;
+    while(len > 0)
+    {
+        ssize_t n = FS_SYS_WRITE(fd, p, len);
+        if(n < 0)
+        {
+            if(errno == EINTR) continue;
+            return -errno;
+        }
+        /* write() returns 0 only for a zero-length request; anything else is a fd that makes no progress. */
+        if(n == 0) return -EIO;
+        p   += n;
+        len -= (size_t)n;
+    }
+    return 0;
+}
+
+int fs_file_pwrite_all(int fd, const void* buf, size_t len, off_t offset)
+{
+    /* Check input. A null buffer is only acceptable for a zero-length write. */
+    if(fd < 0 || (!buf && len > 0) || len > (size_t)SSIZE_MAX || offset < 0) return -EINVAL;
+
+    /* Loop until every byte is accepted: pwrite() may transfer less than asked. */
+    const unsigned char* p = buf;
+    while(len > 0)
+    {
+        ssize_t n = FS_SYS_PWRITE(fd, p, len, offset);
+        if(n < 0)
+        {
+            if(errno == EINTR) continue;
+            return -errno;
+        }
+        if(n == 0) return -EIO;
+        p      += n;
+        len    -= (size_t)n;
+        offset += n;
+    }
+    return 0;
+}
+
+int fs_file_read_all(int fd, void* buf, size_t len)
+{
+    /* Check input. A null buffer is only acceptable for a zero-length read. */
+    if(fd < 0 || (!buf && len > 0) || len > (size_t)SSIZE_MAX) return -EINVAL;
+
+    /* Loop until every byte has arrived: read() may transfer less than asked. */
+    unsigned char* p = buf;
+    while(len > 0)
+    {
+        ssize_t n = FS_SYS_READ(fd, p, len);
+        if(n < 0)
+        {
+            if(errno == EINTR) continue;
+            return -errno;
+        }
+        /* End of file before the request was satisfied. */
+        if(n == 0) return -ENODATA;
+        p   += n;
+        len -= (size_t)n;
+    }
+    return 0;
+}
+
+int fs_file_pread_all(int fd, void* buf, size_t len, off_t offset)
+{
+    /* Check input. A null buffer is only acceptable for a zero-length read. */
+    if(fd < 0 || (!buf && len > 0) || len > (size_t)SSIZE_MAX || offset < 0) return -EINVAL;
+
+    /* Loop until every byte has arrived: pread() may transfer less than asked. */
+    unsigned char* p = buf;
+    while(len > 0)
+    {
+        ssize_t n = FS_SYS_PREAD(fd, p, len, offset);
+        if(n < 0)
+        {
+            if(errno == EINTR) continue;
+            return -errno;
+        }
+        if(n == 0) return -ENODATA;
+        p      += n;
+        len    -= (size_t)n;
+        offset += n;
+    }
     return 0;
 }
 
@@ -897,7 +1066,7 @@ static int _fs_walk(int start_fd, const char* relative_path, enum _fs_walk_mode 
         if(mode == _FS_WALK_OPEN_EXISTING)
         {
             /* Open exactly one child directory, rejecting a final symlink. */
-            next_fd = FS_SYS_OPENAT(parent_fd, component, FS_DIR_OPEN_FLAGS, 0);
+            next_fd = _fs_openat_eintr(parent_fd, component, FS_DIR_OPEN_FLAGS, 0);
             if(next_fd < 0)
             {
                 rc = -errno;
@@ -963,7 +1132,7 @@ static int _fs_file_open_existing_at(const fs_dir_t* parent, const char* name, c
      * verification rejects them, and O_NOCTTY avoids controlling-terminal
      * side effects if the path names a terminal-like device.
      */
-    int fd = FS_SYS_OPENAT(parent->fd, name, access_flags | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY, 0);
+    int fd = _fs_openat_eintr(parent->fd, name, access_flags | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY, 0);
     if(fd < 0) return -errno;
 
     /* Verify the opened child before returning its fd to the caller. */
@@ -1007,6 +1176,46 @@ static int _fs_dup_dir_fd(int fd, int* out_fd)
     /* Transfer the duplicated fd to the caller. */
     *out_fd = dup_fd;
     return 0;
+}
+
+static int _fs_open_eintr(const char* path, int flags)
+{
+    int fd;
+    do
+    {
+        fd = FS_SYS_OPEN(path, flags);
+    } while(fd < 0 && errno == EINTR);
+    return fd;
+}
+
+static int _fs_openat_eintr(int dirfd, const char* name, int flags, mode_t mode)
+{
+    int fd;
+    do
+    {
+        fd = FS_SYS_OPENAT(dirfd, name, flags, mode);
+    } while(fd < 0 && errno == EINTR);
+    return fd;
+}
+
+static int _fs_fsync_eintr(int fd)
+{
+    int rc;
+    do
+    {
+        rc = FS_SYS_FSYNC(fd);
+    } while(rc != 0 && errno == EINTR);
+    return rc;
+}
+
+static int _fs_fdatasync_eintr(int fd)
+{
+    int rc;
+    do
+    {
+        rc = FS_SYS_FDATASYNC(fd);
+    } while(rc != 0 && errno == EINTR);
+    return rc;
 }
 
 static int _fs_fd_verify_cloexec(int fd)

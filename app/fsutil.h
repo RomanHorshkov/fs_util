@@ -55,7 +55,7 @@
  * PATH MODEL
  *
  * - single-component helpers accept exactly one component:
- *   no '/', no ".", no ".."
+ *   no '/', no ".", no "..", no control characters (bytes below 0x20, 0x7F)
  * - path-walk helpers accept relative paths only
  * - absolute paths are rejected
  * - "." components are ignored during walks
@@ -86,10 +86,17 @@
  *
  * - create helpers make the object exist in the filesystem namespace, but do
  *   not fsync the parent directory automatically
- * - rename/unlink helpers also do not fsync automatically
+ * - rename/unlink/rmdir helpers also do not fsync automatically
  * - caller decides exactly where durability barriers belong
- * - use fs_file_fsync() and fs_dir_fsync() explicitly when crash consistency
- *   matters
+ * - use fs_file_fsync(), fs_file_fdatasync() and fs_dir_fsync() explicitly
+ *   when crash consistency matters
+ *
+ * SIGNAL MODEL
+ *
+ * - open(), openat(), fsync() and fdatasync() are retried when a signal
+ *   interrupts them, so -EINTR never surfaces from acquisition or barriers
+ * - the full-transfer I/O helpers likewise retry read()/write() on EINTR
+ * - nothing else is retried: a failure other than EINTR is reported as is
  *
  * FAILURE CLEANUP MODEL
  *
@@ -296,6 +303,8 @@ void fs_dir_close(fs_dir_t* dir);
  * - non-null
  * - non-empty
  * - no '/' characters
+ * - no control characters: no byte below 0x20 and no 0x7F (DEL); every
+ *   other byte, including UTF-8 sequences, is accepted
  * - not "." and not ".."
  *
  * @return 1 if valid, 0 if invalid.
@@ -769,6 +778,26 @@ int fs_rename_noreplace_at(const fs_dir_t* old_parent, const char* old_name, con
 int fs_unlink_at(const fs_dir_t* parent, const char* name);
 
 /**
+ * @brief Remove a single EMPTY directory under a directory capability.
+ *
+ * Path rules:
+ * - `name` must be a single path component
+ * - `parent` must be a valid directory capability
+ *
+ * Semantics:
+ * - this is a thin wrapper around unlinkat(..., AT_REMOVEDIR)
+ * - a non-empty directory is refused (-ENOTEMPTY; some filesystems -EEXIST)
+ * - a symlink to a directory is refused (-ENOTDIR): the link is never followed
+ *
+ * Durability:
+ * - caller should fsync the parent directory when durable deletion semantics
+ *   matter
+ *
+ * @return 0 on success, negative errno on failure.
+ */
+int fs_rmdir_at(const fs_dir_t* parent, const char* name);
+
+/**
  * @brief Fsync a directory capability.
  *
  * Some filesystems report EINVAL for directory fsync. That case is treated as
@@ -804,5 +833,71 @@ int fs_dir_fsync(const fs_dir_t* dir);
  * Treat the file content as lost and recover from a known-good state.
  */
 int fs_file_fsync(int fd);
+
+/**
+ * @brief Fdatasync a regular file descriptor.
+ *
+ * The cheaper barrier for the commit path: data and the metadata needed to
+ * read it back (such as the file size) reach stable storage, while metadata
+ * that does not (timestamps) may not. Prefer it over fs_file_fsync() when the
+ * protocol only needs the bytes to be durable.
+ *
+ * Verification and the finality of a failure are those of fs_file_fsync().
+ */
+int fs_file_fdatasync(int fd);
+
+/**
+ * @brief Write the whole buffer at the current file offset.
+ *
+ * write() may accept fewer bytes than asked; this loops until every byte is
+ * accepted, retrying on EINTR. A write() that makes no progress is reported
+ * as -EIO rather than spun on.
+ *
+ * @param fd Open, blocking file descriptor; any kind the kernel can write to.
+ * @param buf Bytes to write; may be null only when `len` is 0.
+ * @param len Number of bytes; must not exceed SSIZE_MAX.
+ * @return 0 when every byte was written, negative errno otherwise.
+ *
+ * No fd verification is performed: this is the data path. -EAGAIN surfaces
+ * when the caller hands over a non-blocking fd; the fds this library returns
+ * are blocking. On failure an unknown prefix of the buffer may have reached
+ * the file.
+ */
+int fs_file_write_all(int fd, const void* buf, size_t len);
+
+/**
+ * @brief Write the whole buffer at an explicit file offset.
+ *
+ * Positional sibling of fs_file_write_all(): the file offset is not used or
+ * changed, so concurrent callers on one fd do not interfere. Same looping,
+ * EINTR and error rules; `offset` must not be negative.
+ */
+int fs_file_pwrite_all(int fd, const void* buf, size_t len, off_t offset);
+
+/**
+ * @brief Read exactly `len` bytes at the current file offset.
+ *
+ * read() may return fewer bytes than asked; this loops until the buffer is
+ * full, retrying on EINTR. End of file before `len` bytes arrived is an
+ * error, -ENODATA, so a caller reading a fixed-size record never has to check
+ * a count.
+ *
+ * @param fd Open, blocking file descriptor; any kind the kernel can read from.
+ * @param buf Destination; may be null only when `len` is 0.
+ * @param len Number of bytes; must not exceed SSIZE_MAX.
+ * @return 0 when the buffer is full, -ENODATA on premature end of file,
+ *         negative errno otherwise. On failure the buffer content is
+ *         unspecified.
+ */
+int fs_file_read_all(int fd, void* buf, size_t len);
+
+/**
+ * @brief Read exactly `len` bytes at an explicit file offset.
+ *
+ * Positional sibling of fs_file_read_all(): the file offset is not used or
+ * changed. Same looping, EINTR, -ENODATA and error rules; `offset` must not
+ * be negative.
+ */
+int fs_file_pread_all(int fd, void* buf, size_t len, off_t offset);
 
 #endif /* FSUTIL_H */

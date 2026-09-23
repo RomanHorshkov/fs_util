@@ -59,6 +59,7 @@ static void test_expectations_and_cloexec_enforcement(void** state);
 static void test_create_cleanup_on_expectation_mismatch(void** state);
 static void test_umask_independence_for_create_helpers(void** state);
 static void test_output_contracts(void** state);
+static void test_full_transfer_io_fdatasync_and_rmdir(void** state);
 
 /*****************************************************************************************************************************************
  * PUBLIC FUNCTIONS DEFINITIONS
@@ -80,6 +81,7 @@ int main(void)
         cmocka_unit_test_setup_teardown(test_create_cleanup_on_expectation_mismatch, test_env_setup, test_env_teardown),
         cmocka_unit_test_setup_teardown(test_umask_independence_for_create_helpers, test_env_setup, test_env_teardown),
         cmocka_unit_test_setup_teardown(test_output_contracts, test_env_setup, test_env_teardown),
+        cmocka_unit_test_setup_teardown(test_full_transfer_io_fdatasync_and_rmdir, test_env_setup, test_env_teardown),
     };
 
     return cmocka_run_group_tests(tests, NULL, NULL);
@@ -569,5 +571,49 @@ static void test_output_contracts(void** state)
     assert_int_equal(fs_dir_open_at(&root, "anything", NULL, &busy_dir), -EBUSY);
 
     fs_dir_close(&busy_dir);
+    fs_dir_close(&root);
+}
+
+static void test_full_transfer_io_fdatasync_and_rmdir(void** state)
+{
+    test_env_t*   env = *state;
+    fs_dir_t      root;
+    fs_dir_t      tmp;
+    int           fd = -1;
+    unsigned char page[4096];
+    unsigned char back[4096];
+
+    fs_dir_init(&tmp);
+    open_root_cap(env, &root);
+    for(size_t i = 0; i < sizeof(page); ++i)
+        page[i] = (unsigned char)(i * 7U);
+
+    /* Write a page sequentially, patch it positionally, make it durable cheaply, read it back both ways. */
+    assert_int_equal(fs_dir_create_at(&root, "tmp", 0700, NULL, &tmp, NULL), 0);
+    assert_int_equal(fs_file_create_write_new_at(&tmp, "page", 0600, NULL, &fd), 0);
+    assert_int_equal(fs_file_write_all(fd, page, sizeof(page)), 0);
+    assert_int_equal(fs_file_pwrite_all(fd, "PATCH", 5, 100), 0);
+    assert_int_equal(fs_file_fdatasync(fd), 0);
+    assert_int_equal(close(fd), 0);
+    memcpy(page + 100, "PATCH", 5);
+
+    assert_int_equal(fs_file_open_read_at(&tmp, "page", NULL, &fd), 0);
+    assert_int_equal(fs_file_read_all(fd, back, sizeof(back)), 0);
+    assert_memory_equal(back, page, sizeof(page));
+    assert_int_equal(fs_file_read_all(fd, back, 1), -ENODATA);
+    memset(back, 0, sizeof(back));
+    assert_int_equal(fs_file_pread_all(fd, back, 5, 100), 0);
+    assert_memory_equal(back, "PATCH", 5);
+    assert_int_equal(fs_file_pread_all(fd, back, 2, (off_t)sizeof(page) - 1), -ENODATA);
+    assert_int_equal(close(fd), 0);
+
+    /* The scratch directory goes away only once it is empty; the parent is untouched. */
+    int rc_full = fs_rmdir_at(&root, "tmp");
+    assert_true(rc_full == -ENOTEMPTY || rc_full == -EEXIST);
+    assert_int_equal(fs_unlink_at(&tmp, "page"), 0);
+    fs_dir_close(&tmp);
+    assert_int_equal(fs_rmdir_at(&root, "tmp"), 0);
+    assert_int_equal(fs_dir_open_at(&root, "tmp", NULL, &tmp), -ENOENT);
+    assert_int_equal(fs_dir_fsync(&root), 0);
     fs_dir_close(&root);
 }
