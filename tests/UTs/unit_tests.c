@@ -287,6 +287,11 @@ static int hook_fchmod_fail(int fd, mode_t mode)
     if(counted_failure()) return -1;
     return fchmod(fd, mode);
 }
+static int hook_fchmodat_fail(int dirfd, const char* name, mode_t mode)
+{
+    if(counted_failure()) return -1;
+    return fchmodat(dirfd, name, mode, 0);
+}
 static int hook_fstat_fail(int fd, struct stat* st)
 {
     if(counted_failure()) return -1;
@@ -666,6 +671,12 @@ static void test_dir_create_at_contract(void** state)
     assert_int_equal(disp, FS_CREATE_DISPOSITION_CREATED_NEW);
     fs_expect_t exact = fs_expect_private(0750);
     assert_int_equal(fs_dir_verify(&d, &exact), 0);
+    fs_dir_close(&d);
+
+    /* Even a umask that strips the owner's read/search bits cannot break the create. */
+    (void)umask(0777);
+    assert_int_equal(fs_dir_create_at(&env->root, "d0777", 0750, &exact, &d, &disp), 0);
+    assert_int_equal(disp, FS_CREATE_DISPOSITION_CREATED_NEW);
     fs_dir_close(&d);
     (void)umask(022);
 
@@ -1099,8 +1110,8 @@ static void test_fault_dir_create_at(void** state)
     assert_false(entry_exists(&env->root, "n"));
     fs_test_hooks_reset();
 
-    /* fchmod on the fresh directory fails: removed again, errno preserved past the cleanup. */
-    fs_test_hooks.fchmod   = hook_fchmod_fail;
+    /* fchmodat on the fresh directory fails: removed again, errno preserved past the cleanup. */
+    fs_test_hooks.fchmodat = hook_fchmodat_fail;
     fs_test_hooks.unlinkat = hook_unlinkat_clobbers_errno;
     arm_failure(1, EPERM);
     assert_int_equal(fs_dir_create_at(&env->root, "n", 0700, NULL, &d, &disp), -EPERM);

@@ -187,6 +187,9 @@ static void test_open_abs_rejects_invalid_arguments(void** state)
     assert_int_equal(fs_dir_open_abs(NULL, NULL, &out), -EINVAL);
     assert_int_equal(fs_dir_open_abs("", NULL, &out), -EINVAL);
     assert_int_equal(fs_dir_open_abs("relative/path", NULL, &out), -EINVAL);
+    assert_int_equal(fs_dir_open_abs("//", NULL, &out), -EINVAL);
+    assert_int_equal(fs_dir_open_abs("/.", NULL, &out), -EINVAL);
+    assert_int_equal(fs_dir_open_abs("/..", NULL, &out), -EINVAL);
     assert_int_equal(out.fd, -1);
 }
 
@@ -216,6 +219,11 @@ static void test_open_abs_opens_absolute_directory(void** state)
     assert_int_equal(fs_dir_open_abs(env->child_path, NULL, &out), 0);
     assert_same_directory_identity(env->child_path, &out);
     assert_int_equal(fs_dir_verify(&out, NULL), 0);
+    fs_dir_close(&out);
+
+    /* "/" is the one path with no final component and is the root itself. */
+    assert_int_equal(fs_dir_open_abs("/", NULL, &out), 0);
+    assert_same_directory_identity("/", &out);
     fs_dir_close(&out);
 }
 
@@ -262,4 +270,17 @@ static void test_open_abs_rejects_final_symlink(void** state)
     rc = fs_dir_open_abs(env->link_path, NULL, &out);
     assert_true(rc == -ELOOP || rc == -ENOTDIR);
     assert_int_equal(out.fd, -1);
+
+    /* A trailing '/', "/." or "/.." would move O_NOFOLLOW past the link and follow it:
+     * refused up front, for a symlink and for a real directory alike. */
+    static const char* const suffixes[] = {"/", "/.", "/.."};
+    for(size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); ++i)
+    {
+        char path[PATH_MAX];
+        require_join(path, sizeof(path), env->link_path, suffixes[i] + 1);
+        assert_int_equal(fs_dir_open_abs(path, NULL, &out), -EINVAL);
+        require_join(path, sizeof(path), env->child_path, suffixes[i] + 1);
+        assert_int_equal(fs_dir_open_abs(path, NULL, &out), -EINVAL);
+        assert_int_equal(out.fd, -1);
+    }
 }

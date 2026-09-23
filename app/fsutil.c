@@ -28,7 +28,7 @@
 #include <limits.h> /* NAME_MAX */
 #include <stdio.h>  /* renameat, renameat2, RENAME_NOREPLACE */
 #include <string.h> /* memcpy, strcmp, strchr */
-#include <unistd.h> /* close, fsync, unlinkat, fchmod, fstat, geteuid, getegid */
+#include <unistd.h> /* close, fsync, unlinkat, fchmod, fchmodat, fstat, geteuid, getegid */
 
 /*****************************************************************************************************************************************
  * PRIVATE DEFINES
@@ -52,6 +52,7 @@
 #    define FS_SYS_OPENAT(dirfd, name, flags, mode)         (fs_test_hooks.openat((dirfd), (name), (flags), (mode)))
 #    define FS_SYS_MKDIRAT(dirfd, name, mode)               (fs_test_hooks.mkdirat((dirfd), (name), (mode)))
 #    define FS_SYS_FCHMOD(fd, mode)                         (fs_test_hooks.fchmod((fd), (mode)))
+#    define FS_SYS_FCHMODAT(dirfd, name, mode)              (fs_test_hooks.fchmodat((dirfd), (name), (mode)))
 #    define FS_SYS_FSTAT(fd, st)                            (fs_test_hooks.fstat((fd), (st)))
 #    define FS_SYS_FCNTL(fd, cmd, arg)                      (fs_test_hooks.fcntl((fd), (cmd), (arg)))
 #    define FS_SYS_FSYNC(fd)                                (fs_test_hooks.fsync((fd)))
@@ -63,6 +64,7 @@
 #    define FS_SYS_OPENAT(dirfd, name, flags, mode)         openat((dirfd), (name), (flags), (mode))
 #    define FS_SYS_MKDIRAT(dirfd, name, mode)               mkdirat((dirfd), (name), (mode))
 #    define FS_SYS_FCHMOD(fd, mode)                         fchmod((fd), (mode))
+#    define FS_SYS_FCHMODAT(dirfd, name, mode)              fchmodat((dirfd), (name), (mode), 0)
 #    define FS_SYS_FSTAT(fd, st)                            fstat((fd), (st))
 #    define FS_SYS_FCNTL(fd, cmd, arg)                      fcntl((fd), (cmd), (arg))
 #    define FS_SYS_FSYNC(fd)                                fsync((fd))
@@ -128,6 +130,10 @@ static int _fs_default_fcntl(int fd, int cmd, int arg)
 {
     return fcntl(fd, cmd, arg);
 }
+static int _fs_default_fchmodat(int dirfd, const char* name, mode_t mode)
+{
+    return fchmodat(dirfd, name, mode, 0);
+}
 static int _fs_default_renameat2(int ofd, const char* oname, int nfd, const char* nname, unsigned int flags)
 {
     return renameat2(ofd, oname, nfd, nname, flags);
@@ -138,6 +144,7 @@ fs_test_hooks_t fs_test_hooks = {
     .openat    = _fs_default_openat,
     .mkdirat   = mkdirat,
     .fchmod    = fchmod,
+    .fchmodat  = _fs_default_fchmodat,
     .fstat     = fstat,
     .fcntl     = _fs_default_fcntl,
     .fsync     = fsync,
@@ -152,6 +159,7 @@ void fs_test_hooks_reset(void)
     fs_test_hooks.openat    = _fs_default_openat;
     fs_test_hooks.mkdirat   = mkdirat;
     fs_test_hooks.fchmod    = fchmod;
+    fs_test_hooks.fchmodat  = _fs_default_fchmodat;
     fs_test_hooks.fstat     = fstat;
     fs_test_hooks.fcntl     = _fs_default_fcntl;
     fs_test_hooks.fsync     = fsync;
@@ -352,6 +360,11 @@ int fs_dir_open_abs(const char* abs_path, const fs_expect_t* expect, fs_dir_t* o
     if(abs_path[0] != '/') return -EINVAL;
     if(out_dir->fd != -1) return -EBUSY;
 
+    /* O_NOFOLLOW protects the LAST component only. With a trailing '/', "/." or "/.."
+     * the last component is empty or a dot entry, and the kernel would follow a symlink
+     * sitting just before it. Require a real final component; "/" alone is the root. */
+    if(abs_path[1] != '\0' && !fs_component_is_valid(strrchr(abs_path, '/') + 1)) return -EINVAL;
+
     /* Bootstrap a capability from an absolute directory root. O_NOFOLLOW
      * rejects a symlink at the final component; the trusted parent chain is
      * resolved normally. */
@@ -508,6 +521,21 @@ int fs_dir_create_at(const fs_dir_t* parent, const char* name, mode_t create_mod
     if(FS_SYS_MKDIRAT(parent->fd, name, create_mode) == 0)
     {
         create_disposition = FS_CREATE_DISPOSITION_CREATED_NEW;
+
+        /*
+         * Force the final directory mode explicitly, before opening it.
+         * mkdirat() applies the process umask; a restrictive umask can strip the
+         * owner's read/search bits and then the O_RDONLY open below would fail.
+         * The name-based chmod is within the trusted-parent model already used
+         * by the cleanup path; the fstat()-based verification below is what
+         * guarantees the exact mode on the fd actually returned.
+         */
+        if(FS_SYS_FCHMODAT(parent->fd, name, create_mode) != 0)
+        {
+            int saved_errno = errno;
+            _fs_cleanup_created_directory_at(parent->fd, name);
+            return -saved_errno;
+        }
     }
     else if(errno != EEXIST)
     {
@@ -520,18 +548,6 @@ int fs_dir_create_at(const fs_dir_t* parent, const char* name, mode_t create_mod
     {
         int saved_errno = errno;
         if(create_disposition == FS_CREATE_DISPOSITION_CREATED_NEW) _fs_cleanup_created_directory_at(parent->fd, name);
-        return -saved_errno;
-    }
-
-    /*
-     * Force the final directory mode explicitly.
-     * This makes the result independent from the caller's current umask.
-     */
-    if(create_disposition == FS_CREATE_DISPOSITION_CREATED_NEW && FS_SYS_FCHMOD(fd, create_mode) != 0)
-    {
-        int saved_errno = errno;
-        close(fd);
-        _fs_cleanup_created_directory_at(parent->fd, name);
         return -saved_errno;
     }
 

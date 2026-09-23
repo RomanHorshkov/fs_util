@@ -25,6 +25,7 @@ typedef struct fs_test_hooks
     int (*openat)(int dirfd, const char* name, int flags, mode_t mode);
     int (*mkdirat)(int dirfd, const char* name, mode_t mode);
     int (*fchmod)(int fd, mode_t mode);
+    int (*fchmodat)(int dirfd, const char* name, mode_t mode);
     int (*fstat)(int fd, struct stat* st);
     int (*fcntl)(int fd, int cmd, int arg);
     int (*fsync)(int fd);

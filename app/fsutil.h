@@ -321,6 +321,10 @@ int fs_component_is_valid(const char* name);
  *
  * Path rules:
  * - `abs_path` must be absolute (leading '/').
+ * - The final component must be a real name: a trailing '/', "/." or "/.." is
+ *   rejected (-EINVAL), because the kernel applies O_NOFOLLOW to the last
+ *   component only and would follow a symlink placed just before such a
+ *   suffix. "/" alone is accepted.
  * - The final component is opened with O_NOFOLLOW: a symlink at the final
  *   component is rejected. Intermediate components are resolved normally, so
  *   callers are expected to own or trust the parent chain (typically it is
@@ -335,7 +339,8 @@ int fs_component_is_valid(const char* name);
  * - caller must later call fs_dir_close().
  *
  * Failure cases:
- * - -EINVAL if `out_dir` is null, `abs_path` is null/empty, or not absolute.
+ * - -EINVAL if `out_dir` is null, `abs_path` is null/empty, not absolute, or
+ *   ends in '/', "/." or "/.." (other than "/" itself).
  * - -EBUSY if `out_dir` already owns an fd.
  * - -ENOTDIR if the final component is a symlink: with O_DIRECTORY|O_NOFOLLOW the
  *   kernel reports the link as "not a directory" (older kernels report -ELOOP).
@@ -499,8 +504,10 @@ int fs_dir_open_at(const fs_dir_t* parent, const char* name, const fs_expect_t* 
  * Behavior:
  * - attempts mkdirat() first
  * - if the directory already exists, it is opened and verified
- * - if a directory is newly created, the helper may call fchmod() so the final
- *   mode is explicit and not silently left to the process umask
+ * - if a directory is newly created, the helper sets its mode explicitly
+ *   (fchmodat() under the parent capability, before the directory is opened)
+ *   so the result is independent of the process umask: even a umask that
+ *   strips the owner's read/search bits cannot make the create fail
  *
  * Path rules:
  * - `name` must be a single path component
@@ -526,7 +533,7 @@ int fs_dir_open_at(const fs_dir_t* parent, const char* name, const fs_expect_t* 
  * - -EINVAL for invalid inputs, invalid component names, or invalid mode bits
  * - -EBUSY if `out_dir` already owns an fd
  * - -ENOTDIR / -EACCES if verification fails
- * - other negative errno from mkdirat(), openat(), fchmod(), fcntl(), or
+ * - other negative errno from mkdirat(), fchmodat(), openat(), fcntl(), or
  *   fstat()
  */
 int fs_dir_create_at(const fs_dir_t* parent, const char* name, mode_t create_mode, const fs_expect_t* expect, fs_dir_t* out_dir,
@@ -765,7 +772,11 @@ int fs_unlink_at(const fs_dir_t* parent, const char* name);
  * @brief Fsync a directory capability.
  *
  * Some filesystems report EINVAL for directory fsync. That case is treated as
- * success, matching fs_fsync_dir().
+ * success: such a filesystem offers no directory barrier to wait for.
+ *
+ * Any other fsync() failure (typically -EIO) is final: Linux reports a
+ * writeback error once and then drops the dirty pages, so retrying the call
+ * cannot make the data durable. Treat the affected data as lost.
  *
  * This function is intentionally small and explicit:
  * caller decides when a directory durability barrier belongs in the higher
@@ -787,6 +798,10 @@ int fs_dir_fsync(const fs_dir_t* dir);
  * Verification:
  * - the supplied fd must verify as a regular file descriptor before fsync()
  *   is attempted
+ *
+ * A failure (typically -EIO) is final: Linux reports a writeback error once
+ * and then drops the dirty pages, so retrying cannot make the data durable.
+ * Treat the file content as lost and recover from a known-good state.
  */
 int fs_file_fsync(int fd);
 
