@@ -58,6 +58,7 @@ static void test_symlink_rejection(void** state);
 static void test_expectations_and_cloexec_enforcement(void** state);
 static void test_create_cleanup_on_expectation_mismatch(void** state);
 static void test_umask_independence_for_create_helpers(void** state);
+static void test_composed_helpers(void** state);
 static void test_output_contracts(void** state);
 static void test_full_transfer_io_fdatasync_and_rmdir(void** state);
 
@@ -65,6 +66,78 @@ static void test_full_transfer_io_fdatasync_and_rmdir(void** state);
  * PUBLIC FUNCTIONS DEFINITIONS
  *****************************************************************************************************************************************
  */
+
+static void test_composed_helpers(void** state)
+{
+    test_env_t* env = *state;
+    fs_dir_t    root;
+    fs_dir_t    snap;
+    struct stat a;
+    struct stat b;
+    char        buf[64];
+    ssize_t     n;
+    int         fd = -1;
+
+    fs_dir_init(&root);
+    fs_dir_init(&snap);
+    open_root_cap(env, &root);
+
+    /* The switch: create, then replace; the link always resolves to one of the two targets. */
+    assert_int_equal(fs_symlink_replace_at(&root, "releases/1-a", "current"), 0);
+    assert_int_equal(fs_symlink_replace_at(&root, "releases/2-b", "current"), 0);
+    n = readlinkat(root.fd, "current", buf, sizeof(buf) - 1);
+    assert_true(n > 0);
+    buf[n] = '\0';
+    assert_string_equal(buf, "releases/2-b");
+    assert_int_equal(fs_symlink_at(&root, "releases/1-a", "previous"), 0);
+    assert_int_equal(fs_symlink_at(&root, "x", "previous"), -EEXIST);
+
+    /* The atomic write: the file holds the whole new content and the exact mode. */
+    assert_int_equal(fs_write_file_atomic_at(&root, "committed", "2\n", 2, 0644), 0);
+    assert_int_equal(fs_write_file_atomic_at(&root, "committed", "3\n", 2, 0644), 0);
+    assert_int_equal(fs_file_open_read_at(&root, "committed", NULL, &fd), 0);
+    assert_int_equal(fs_file_read_all(fd, buf, 2), 0);
+    assert_memory_equal(buf, "3\n", 2);
+    assert_int_equal(close(fd), 0);
+    assert_int_equal(fstatat(root.fd, "committed", &a, 0), 0);
+    assert_int_equal((int)(a.st_mode & FS_MODE_MASK), 0644);
+    assert_int_equal(fstatat(root.fd, "committed.tmp", &a, AT_SYMLINK_NOFOLLOW), -1);
+
+    /* The hard-link mirror shares inodes with the source. */
+    create_raw_directory(&root, "blobs", 0700);
+    assert_int_equal(fs_dir_open_at(&root, "blobs", NULL, &snap), 0);
+    create_raw_file(&snap, "one", 0600, "1");
+    create_raw_directory(&snap, "sub", 0700);
+    fs_dir_close(&snap);
+    assert_int_equal(fs_link_tree_at(&root, "blobs", &root, "blobs.snap"), 0);
+    assert_int_equal(fstatat(root.fd, "blobs/one", &a, 0), 0);
+    assert_int_equal(fstatat(root.fd, "blobs.snap/one", &b, 0), 0);
+    assert_true(a.st_ino == b.st_ino);
+    assert_int_equal(fstatat(root.fd, "blobs.snap/sub", &b, AT_SYMLINK_NOFOLLOW), 0);
+    assert_true(S_ISDIR(b.st_mode));
+
+    /* Across filesystems the first link reports -EXDEV; proven for real when /tmp is one. */
+    {
+        char     other_path[] = "/tmp/fsutil-it-xdev-XXXXXX";
+        fs_dir_t other;
+        fs_dir_init(&other);
+        if(mkdtemp(other_path) != NULL)
+        {
+            assert_int_equal(fs_dir_open_abs_nofollow(other_path, NULL, &other), 0);
+            assert_int_equal(fstat(other.fd, &b), 0);
+            assert_int_equal(fstat(root.fd, &a), 0);
+            if(a.st_dev != b.st_dev)
+            {
+                assert_int_equal(fs_link_tree_at(&root, "blobs", &other, "mirror"), -EXDEV);
+                assert_int_equal(unlinkat(other.fd, "mirror", AT_REMOVEDIR), 0);
+            }
+            fs_dir_close(&other);
+            (void)rmdir(other_path);
+        }
+    }
+
+    fs_dir_close(&root);
+}
 
 int main(void)
 {
@@ -80,6 +153,7 @@ int main(void)
         cmocka_unit_test_setup_teardown(test_expectations_and_cloexec_enforcement, test_env_setup, test_env_teardown),
         cmocka_unit_test_setup_teardown(test_create_cleanup_on_expectation_mismatch, test_env_setup, test_env_teardown),
         cmocka_unit_test_setup_teardown(test_umask_independence_for_create_helpers, test_env_setup, test_env_teardown),
+        cmocka_unit_test_setup_teardown(test_composed_helpers, test_env_setup, test_env_teardown),
         cmocka_unit_test_setup_teardown(test_output_contracts, test_env_setup, test_env_teardown),
         cmocka_unit_test_setup_teardown(test_full_transfer_io_fdatasync_and_rmdir, test_env_setup, test_env_teardown),
     };

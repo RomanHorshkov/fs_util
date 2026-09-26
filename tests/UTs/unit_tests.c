@@ -394,6 +394,52 @@ static int hook_unlinkat_clobbers_errno(int dirfd, const char* name, int flags)
     return rc;
 }
 
+static int hook_symlinkat_fail(const char* target, int dirfd, const char* name)
+{
+    if(counted_failure()) return -1;
+    return symlinkat(target, dirfd, name);
+}
+static int hook_linkat_fail(int ofd, const char* oname, int nfd, const char* nname, int flags)
+{
+    if(counted_failure()) return -1;
+    return linkat(ofd, oname, nfd, nname, flags);
+}
+static int hook_fstatat_fail(int dirfd, const char* name, struct stat* st, int flags)
+{
+    if(counted_failure()) return -1;
+    return fstatat(dirfd, name, st, flags);
+}
+static ssize_t hook_readlinkat_fail(int dirfd, const char* name, char* buf, size_t size)
+{
+    if(counted_failure()) return -1;
+    return readlinkat(dirfd, name, buf, size);
+}
+/* A target that fills the whole buffer: the kernel truncates silently, the library must not. */
+static ssize_t hook_readlinkat_full(int dirfd, const char* name, char* buf, size_t size)
+{
+    (void)dirfd;
+    (void)name;
+    memset(buf, 'x', size);
+    return (ssize_t)size;
+}
+static DIR* hook_fdopendir_fail(int fd)
+{
+    (void)fd;
+    errno = g_fail_errno;
+    return NULL;
+}
+static struct dirent* hook_readdir_fail(DIR* dir)
+{
+    (void)dir;
+    errno = g_fail_errno;
+    return NULL;
+}
+static int hook_unlinkat_counted(int dirfd, const char* name, int flags)
+{
+    if(counted_failure()) return -1;
+    return unlinkat(dirfd, name, flags);
+}
+
 static void arm_failure(int nth_call, int err)
 {
     g_fail_on_call     = nth_call;
@@ -1492,6 +1538,442 @@ static void test_fault_file_io_all(void** state)
  *****************************************************************************************************************************************
  */
 
+/*****************************************************************************************************************************************
+ * PRIVATE FUNCTIONS DEFINITIONS — composed helpers: symlinks, atomic write, link tree
+ *****************************************************************************************************************************************
+ */
+
+static void assert_link_target(const fs_dir_t* parent, const char* name, const char* expected)
+{
+    char    buf[PATH_MAX];
+    ssize_t n = readlinkat(parent->fd, name, buf, sizeof(buf) - 1);
+    assert_true(n >= 0);
+    buf[n] = '\0';
+    assert_string_equal(buf, expected);
+}
+
+static void assert_file_content(const fs_dir_t* parent, const char* name, const char* expected)
+{
+    char    buf[256];
+    int     fd = openat(parent->fd, name, O_RDONLY | O_CLOEXEC);
+    ssize_t n;
+    assert_true(fd >= 0);
+    n = read(fd, buf, sizeof(buf) - 1);
+    assert_true(n >= 0);
+    buf[n] = '\0';
+    (void)close(fd);
+    assert_string_equal(buf, expected);
+}
+
+static void test_symlink_at(void** state)
+{
+    test_env_t* env = *state;
+    fs_dir_t    not_a_dir;
+    int         file_fd = -1;
+
+    /* Input refusals. */
+    assert_int_equal(fs_symlink_at(NULL, "t", "l"), -EINVAL);
+    fs_dir_init(&not_a_dir);
+    assert_int_equal(fs_symlink_at(&not_a_dir, "t", "l"), -EINVAL);
+    assert_int_equal(fs_symlink_at(&env->root, NULL, "l"), -EINVAL);
+    assert_int_equal(fs_symlink_at(&env->root, "", "l"), -EINVAL);
+    assert_int_equal(fs_symlink_at(&env->root, "t", "a/b"), -EINVAL);
+
+    /* The parent must verify as a directory capability. */
+    make_file(&env->root, "f", 0600);
+    file_fd = openat(env->root.fd, "f", O_RDONLY | O_CLOEXEC);
+    assert_true(file_fd >= 0);
+    not_a_dir.fd = file_fd;
+    assert_int_equal(fs_symlink_at(&not_a_dir, "t", "l"), -ENOTDIR);
+    (void)close(file_fd);
+
+    /* The target is stored verbatim, relative or absolute, existing or not. */
+    assert_int_equal(fs_symlink_at(&env->root, "releases/1-abc", "current"), 0);
+    assert_link_target(&env->root, "current", "releases/1-abc");
+    assert_int_equal(fs_symlink_at(&env->root, "/nowhere", "abs"), 0);
+    assert_link_target(&env->root, "abs", "/nowhere");
+
+    /* An existing entry of any kind is never replaced. */
+    assert_int_equal(fs_symlink_at(&env->root, "other", "current"), -EEXIST);
+    assert_int_equal(fs_symlink_at(&env->root, "other", "f"), -EEXIST);
+    assert_link_target(&env->root, "current", "releases/1-abc");
+}
+
+static void test_symlink_replace_at(void** state)
+{
+    test_env_t* env = *state;
+    fs_dir_t    not_a_dir;
+    char        long_name[NAME_MAX + 1];
+
+    /* Input refusals. */
+    assert_int_equal(fs_symlink_replace_at(NULL, "t", "l"), -EINVAL);
+    fs_dir_init(&not_a_dir);
+    assert_int_equal(fs_symlink_replace_at(&not_a_dir, "t", "l"), -EINVAL);
+    assert_int_equal(fs_symlink_replace_at(&env->root, NULL, "l"), -EINVAL);
+    assert_int_equal(fs_symlink_replace_at(&env->root, "", "l"), -EINVAL);
+    assert_int_equal(fs_symlink_replace_at(&env->root, "t", ".."), -EINVAL);
+    make_file(&env->root, "f", 0600);
+    not_a_dir.fd = openat(env->root.fd, "f", O_RDONLY | O_CLOEXEC);
+    assert_true(not_a_dir.fd >= 0);
+    assert_int_equal(fs_symlink_replace_at(&not_a_dir, "t", "l"), -ENOTDIR);
+    fs_dir_close(&not_a_dir);
+
+    /* A valid component that leaves no room for the ".tmp" suffix. */
+    memset(long_name, 'n', NAME_MAX - 3);
+    long_name[NAME_MAX - 3] = '\0';
+    assert_int_equal(fs_symlink_replace_at(&env->root, "t", long_name), -ENAMETOOLONG);
+    memset(long_name, 'n', NAME_MAX - 4);
+    long_name[NAME_MAX - 4] = '\0';
+    assert_int_equal(fs_symlink_replace_at(&env->root, "t", long_name), 0);
+    assert_link_target(&env->root, long_name, "t");
+
+    /* First switch creates the link; the second replaces it; no temporary remains. */
+    assert_int_equal(fs_symlink_replace_at(&env->root, "releases/1-a", "current"), 0);
+    assert_link_target(&env->root, "current", "releases/1-a");
+    assert_int_equal(fs_symlink_replace_at(&env->root, "releases/2-b", "current"), 0);
+    assert_link_target(&env->root, "current", "releases/2-b");
+    assert_false(entry_exists(&env->root, "current.tmp"));
+
+    /* A stale temporary from an earlier crash is cleared, a regular file is replaced. */
+    make_symlink(&env->root, "current.tmp", "stale");
+    assert_int_equal(fs_symlink_replace_at(&env->root, "releases/3-c", "current"), 0);
+    assert_link_target(&env->root, "current", "releases/3-c");
+    assert_false(entry_exists(&env->root, "current.tmp"));
+    assert_int_equal(fs_symlink_replace_at(&env->root, "gone", "f"), 0);
+    assert_link_target(&env->root, "f", "gone");
+
+    /* A directory is never replaced by a link. */
+    make_dir(&env->root, "d", 0700);
+    assert_int_equal(fs_symlink_replace_at(&env->root, "t", "d"), -EISDIR);
+    assert_false(entry_exists(&env->root, "d.tmp"));
+}
+
+static void test_write_file_atomic_at(void** state)
+{
+    test_env_t* env = *state;
+    fs_dir_t    not_a_dir;
+    struct stat st;
+    char        long_name[NAME_MAX + 1];
+
+    /* Input refusals. */
+    assert_int_equal(fs_write_file_atomic_at(NULL, "n", "x", 1, 0600), -EINVAL);
+    fs_dir_init(&not_a_dir);
+    assert_int_equal(fs_write_file_atomic_at(&not_a_dir, "n", "x", 1, 0600), -EINVAL);
+    assert_int_equal(fs_write_file_atomic_at(&env->root, ".", "x", 1, 0600), -EINVAL);
+    assert_int_equal(fs_write_file_atomic_at(&env->root, "n", NULL, 1, 0600), -EINVAL);
+    assert_int_equal(fs_write_file_atomic_at(&env->root, "n", "x", (size_t)SSIZE_MAX + 1U, 0600), -EINVAL);
+    assert_int_equal(fs_write_file_atomic_at(&env->root, "n", "x", 1, S_IFREG | 0600), -EINVAL);
+    make_file(&env->root, "f", 0600);
+    not_a_dir.fd = openat(env->root.fd, "f", O_RDONLY | O_CLOEXEC);
+    assert_true(not_a_dir.fd >= 0);
+    assert_int_equal(fs_write_file_atomic_at(&not_a_dir, "n", "x", 1, 0600), -ENOTDIR);
+    fs_dir_close(&not_a_dir);
+    memset(long_name, 'n', NAME_MAX - 3);
+    long_name[NAME_MAX - 3] = '\0';
+    assert_int_equal(fs_write_file_atomic_at(&env->root, long_name, "x", 1, 0600), -ENAMETOOLONG);
+
+    /* Create, then replace; the mode is exact whatever the umask; no temporary remains. */
+    (void)umask(077);
+    assert_int_equal(fs_write_file_atomic_at(&env->root, "seq", "1\n", 2, 0644), 0);
+    assert_file_content(&env->root, "seq", "1\n");
+    assert_int_equal(fstatat(env->root.fd, "seq", &st, AT_SYMLINK_NOFOLLOW), 0);
+    assert_true(S_ISREG(st.st_mode));
+    assert_int_equal((int)(st.st_mode & FS_MODE_MASK), 0644);
+    assert_int_equal(fs_write_file_atomic_at(&env->root, "seq", "22\n", 3, 0600), 0);
+    assert_file_content(&env->root, "seq", "22\n");
+    assert_int_equal(fstatat(env->root.fd, "seq", &st, AT_SYMLINK_NOFOLLOW), 0);
+    assert_int_equal((int)(st.st_mode & FS_MODE_MASK), 0600);
+    assert_false(entry_exists(&env->root, "seq.tmp"));
+    (void)umask(022);
+
+    /* An empty file needs no buffer; a stale temporary is cleared first. */
+    make_file(&env->root, "empty.tmp", 0600);
+    assert_int_equal(fs_write_file_atomic_at(&env->root, "empty", NULL, 0, 0600), 0);
+    assert_file_content(&env->root, "empty", "");
+    assert_false(entry_exists(&env->root, "empty.tmp"));
+
+    /* A directory in the way of the temporary name is not removed. */
+    make_dir(&env->root, "blocked.tmp", 0700);
+    assert_int_equal(fs_write_file_atomic_at(&env->root, "blocked", "x", 1, 0600), -EISDIR);
+    assert_false(entry_exists(&env->root, "blocked"));
+}
+
+/* Build the source tree the link-tree tests mirror: dir/{a, sub/{b, link -> ../a}, sub/deep/}. */
+static void make_source_tree(const fs_dir_t* root)
+{
+    fs_dir_t dir;
+    fs_dir_t sub;
+    fs_dir_init(&dir);
+    fs_dir_init(&sub);
+    make_dir(root, "src", 0750);
+    assert_int_equal(fs_dir_open_at(root, "src", NULL, &dir), 0);
+    make_file(&dir, "a", 0640);
+    make_dir(&dir, "sub", 0700);
+    assert_int_equal(fs_dir_open_at(&dir, "sub", NULL, &sub), 0);
+    make_file(&sub, "b", 0600);
+    make_symlink(&sub, "link", "../a");
+    make_dir(&sub, "deep", 0700);
+    fs_dir_close(&sub);
+    fs_dir_close(&dir);
+}
+
+static void test_link_tree_at(void** state)
+{
+    test_env_t* env = *state;
+    fs_dir_t    not_a_dir;
+    fs_dir_t    dst;
+    fs_dir_t    sub;
+    struct stat src_st;
+    struct stat dst_st;
+    int         fd = -1;
+
+    /* Input refusals. */
+    assert_int_equal(fs_link_tree_at(NULL, "s", &env->root, "d"), -EINVAL);
+    fs_dir_init(&not_a_dir);
+    assert_int_equal(fs_link_tree_at(&not_a_dir, "s", &env->root, "d"), -EINVAL);
+    assert_int_equal(fs_link_tree_at(&env->root, "s", NULL, "d"), -EINVAL);
+    assert_int_equal(fs_link_tree_at(&env->root, "s", &not_a_dir, "d"), -EINVAL);
+    assert_int_equal(fs_link_tree_at(&env->root, "s/x", &env->root, "d"), -EINVAL);
+    assert_int_equal(fs_link_tree_at(&env->root, "s", &env->root, ""), -EINVAL);
+    make_file(&env->root, "f", 0600);
+    not_a_dir.fd = openat(env->root.fd, "f", O_RDONLY | O_CLOEXEC);
+    assert_true(not_a_dir.fd >= 0);
+    assert_int_equal(fs_link_tree_at(&not_a_dir, "s", &env->root, "d"), -ENOTDIR);
+    assert_int_equal(fs_link_tree_at(&env->root, "s", &not_a_dir, "d"), -ENOTDIR);
+    fs_dir_close(&not_a_dir);
+
+    /* The source must exist and be a real directory. */
+    assert_int_equal(fs_link_tree_at(&env->root, "missing", &env->root, "d"), -ENOENT);
+    make_source_tree(&env->root);
+    make_symlink(&env->root, "srclink", "src");
+    assert_dir_symlink_rejected(fs_link_tree_at(&env->root, "srclink", &env->root, "d"));
+    assert_false(entry_exists(&env->root, "d"));
+
+    /* The mirror: same shape, shared inodes, same link targets, same directory bits. */
+    assert_int_equal(fs_link_tree_at(&env->root, "src", &env->root, "snap"), 0);
+    fs_dir_init(&dst);
+    fs_dir_init(&sub);
+    assert_int_equal(fs_dir_open_at(&env->root, "snap", NULL, &dst), 0);
+    assert_int_equal(fstatat(env->root.fd, "src", &src_st, 0), 0);
+    assert_int_equal(fstat(dst.fd, &dst_st), 0);
+    assert_int_equal((int)(dst_st.st_mode & FS_MODE_MASK), (int)(src_st.st_mode & FS_MODE_MASK));
+    assert_int_equal(fstatat(env->root.fd, "src/a", &src_st, 0), 0);
+    assert_int_equal(fstatat(dst.fd, "a", &dst_st, 0), 0);
+    assert_true(src_st.st_ino == dst_st.st_ino && src_st.st_dev == dst_st.st_dev);
+    assert_int_equal((int)src_st.st_nlink, 2);
+    assert_int_equal(fs_dir_open_at(&dst, "sub", NULL, &sub), 0);
+    assert_int_equal(fstatat(env->root.fd, "src/sub/b", &src_st, 0), 0);
+    assert_int_equal(fstatat(sub.fd, "b", &dst_st, 0), 0);
+    assert_true(src_st.st_ino == dst_st.st_ino);
+    assert_link_target(&sub, "link", "../a");
+    assert_int_equal(fstatat(sub.fd, "deep", &dst_st, AT_SYMLINK_NOFOLLOW), 0);
+    assert_true(S_ISDIR(dst_st.st_mode));
+    fs_dir_close(&sub);
+    fs_dir_close(&dst);
+
+    /* The destination is never reused: a partial mirror is the caller's to remove. */
+    assert_int_equal(fs_link_tree_at(&env->root, "src", &env->root, "snap"), -EEXIST);
+    assert_int_equal(fs_link_tree_at(&env->root, "src", &env->root, "f"), -EEXIST);
+
+    /* An entry that is neither directory, file nor symlink refuses the whole call. */
+    assert_int_equal(mkfifoat(env->root.fd, "src/sub/fifo", 0600), 0);
+    assert_int_equal(fs_link_tree_at(&env->root, "src", &env->root, "snap2"), -EINVAL);
+    assert_true(entry_exists(&env->root, "snap2"));
+    assert_int_equal(unlinkat(env->root.fd, "src/sub/fifo", 0), 0);
+
+    /* A tree nested deeper than the bound is refused rather than walked without limit. */
+    make_dir(&env->root, "deep", 0700);
+    fd = openat(env->root.fd, "deep", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    assert_true(fd >= 0);
+    for(int i = 0; i <= FS_LINK_TREE_MAX_DEPTH; ++i)
+    {
+        int next;
+        assert_int_equal(mkdirat(fd, "n", 0700), 0);
+        next = openat(fd, "n", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        assert_true(next >= 0);
+        (void)close(fd);
+        fd = next;
+    }
+    (void)close(fd);
+    assert_int_equal(fs_link_tree_at(&env->root, "deep", &env->root, "deep2"), -ELOOP);
+}
+
+#ifdef FS_UTIL_TESTING
+static void test_fault_symlink_helpers(void** state)
+{
+    test_env_t* env = *state;
+
+    /* fs_symlink_at: the kernel's refusal is reported as is. */
+    fs_test_hooks.symlinkat = hook_symlinkat_fail;
+    arm_failure(1, EROFS);
+    assert_int_equal(fs_symlink_at(&env->root, "t", "l"), -EROFS);
+    fs_test_hooks_reset();
+    assert_false(entry_exists(&env->root, "l"));
+
+    /* fs_symlink_replace_at: clearing a stale temporary can fail for a reason other than absence. */
+    fs_test_hooks.unlinkat = hook_unlinkat_counted;
+    arm_failure(1, EACCES);
+    assert_int_equal(fs_symlink_replace_at(&env->root, "t", "cur"), -EACCES);
+    fs_test_hooks_reset();
+
+    /* The temporary link cannot be created. */
+    fs_test_hooks.symlinkat = hook_symlinkat_fail;
+    arm_failure(1, ENOSPC);
+    assert_int_equal(fs_symlink_replace_at(&env->root, "t", "cur"), -ENOSPC);
+    fs_test_hooks_reset();
+    assert_false(entry_exists(&env->root, "cur"));
+    assert_false(entry_exists(&env->root, "cur.tmp"));
+
+    /* The rename fails: the temporary is removed, the old link is untouched. */
+    make_symlink(&env->root, "cur", "old");
+    fs_test_hooks.renameat = hook_renameat_fail;
+    g_fail_errno           = EIO;
+    assert_int_equal(fs_symlink_replace_at(&env->root, "new", "cur"), -EIO);
+    fs_test_hooks_reset();
+    assert_link_target(&env->root, "cur", "old");
+    assert_false(entry_exists(&env->root, "cur.tmp"));
+
+    /* The directory barrier fails after the switch: reported, never masked. */
+    fs_test_hooks.fsync = hook_fsync_fail;
+    g_fail_errno        = EIO;
+    assert_int_equal(fs_symlink_replace_at(&env->root, "new", "cur"), -EIO);
+    fs_test_hooks_reset();
+}
+
+static void test_fault_write_file_atomic(void** state)
+{
+    test_env_t* env = *state;
+    int         fd  = -1;
+
+    make_file(&env->root, "seq", 0600);
+
+    /* Clearing a stale temporary fails for a reason other than absence. */
+    fs_test_hooks.unlinkat = hook_unlinkat_counted;
+    arm_failure(1, EACCES);
+    assert_int_equal(fs_write_file_atomic_at(&env->root, "seq", "2", 1, 0600), -EACCES);
+    fs_test_hooks_reset();
+
+    /* The temporary cannot be created. */
+    fs_test_hooks.openat = hook_openat_fail;
+    arm_failure(1, ENOSPC);
+    assert_int_equal(fs_write_file_atomic_at(&env->root, "seq", "2", 1, 0600), -ENOSPC);
+    fs_test_hooks_reset();
+    assert_false(entry_exists(&env->root, "seq.tmp"));
+
+    /* The write fails: temporary removed, target untouched. */
+    fs_test_hooks.write = hook_write_one_byte;
+    arm_failure(2, ENOSPC);
+    assert_int_equal(fs_write_file_atomic_at(&env->root, "seq", "22", 2, 0600), -ENOSPC);
+    fs_test_hooks_reset();
+    assert_file_content(&env->root, "seq", "x");
+    assert_false(entry_exists(&env->root, "seq.tmp"));
+
+    /* The file barrier fails. */
+    fs_test_hooks.fsync = hook_fsync_fail;
+    g_fail_errno        = EIO;
+    assert_int_equal(fs_write_file_atomic_at(&env->root, "seq", "2", 1, 0600), -EIO);
+    fs_test_hooks_reset();
+    assert_file_content(&env->root, "seq", "x");
+    assert_false(entry_exists(&env->root, "seq.tmp"));
+
+    /* The rename fails after the file was synced and closed. */
+    fs_test_hooks.renameat = hook_renameat_fail;
+    g_fail_errno           = EIO;
+    assert_int_equal(fs_write_file_atomic_at(&env->root, "seq", "2", 1, 0600), -EIO);
+    fs_test_hooks_reset();
+    assert_file_content(&env->root, "seq", "x");
+    assert_false(entry_exists(&env->root, "seq.tmp"));
+
+    /* The directory barrier fails after the rename: the new bytes are in place, the caller is told. */
+    fs_test_hooks.fsync = hook_fsync_eintr_once;
+    arm_failure(2, EIO);
+    assert_int_equal(fs_write_file_atomic_at(&env->root, "seq", "2", 1, 0600), -EIO);
+    fs_test_hooks_reset();
+    assert_file_content(&env->root, "seq", "2");
+
+    /* A signal during the file barrier is retried, not reported. */
+    fs_test_hooks.fsync = hook_fsync_eintr_once;
+    arm_failure(1, EINTR);
+    assert_int_equal(fs_write_file_atomic_at(&env->root, "seq", "3", 1, 0600), 0);
+    fs_test_hooks_reset();
+    assert_file_content(&env->root, "seq", "3");
+    (void)fd;
+}
+
+static void test_fault_link_tree(void** state)
+{
+    test_env_t* env = *state;
+
+    make_source_tree(&env->root);
+
+    /* Stat of the source directory fails. */
+    fs_test_hooks.fstat = hook_fstat_fail;
+    arm_failure(3, EIO); /* two F_GETFD verifies stat nothing; the third fstat is the tree root */
+    assert_int_equal(fs_link_tree_at(&env->root, "src", &env->root, "d1"), -EIO);
+    fs_test_hooks_reset();
+
+    /* The mirror directory is created but cannot be opened. */
+    fs_test_hooks.openat = hook_openat_fail;
+    arm_failure(2, EACCES);
+    assert_int_equal(fs_link_tree_at(&env->root, "src", &env->root, "d2"), -EACCES);
+    fs_test_hooks_reset();
+
+    /* A child directory cannot be opened. */
+    fs_test_hooks.openat = hook_openat_fail;
+    arm_failure(3, EACCES);
+    assert_int_equal(fs_link_tree_at(&env->root, "src", &env->root, "d3"), -EACCES);
+    fs_test_hooks_reset();
+
+    /* The final chmod of a completed mirror fails. */
+    fs_test_hooks.fchmod = hook_fchmod_fail;
+    arm_failure(1, EPERM);
+    assert_int_equal(fs_link_tree_at(&env->root, "src", &env->root, "d4"), -EPERM);
+    fs_test_hooks_reset();
+
+    /* The scan duplicate cannot be made; the stream cannot be opened; the stream reports an error. */
+    fs_test_hooks.fcntl = hook_fcntl_fail;
+    arm_failure(1, EMFILE);
+    g_fcntl_cmd_filter = F_DUPFD_CLOEXEC;
+    assert_int_equal(fs_link_tree_at(&env->root, "src", &env->root, "d5"), -EMFILE);
+    fs_test_hooks_reset();
+    fs_test_hooks.fdopendir = hook_fdopendir_fail;
+    g_fail_errno            = ENOMEM;
+    assert_int_equal(fs_link_tree_at(&env->root, "src", &env->root, "d6"), -ENOMEM);
+    fs_test_hooks_reset();
+    fs_test_hooks.readdir = hook_readdir_fail;
+    g_fail_errno          = EBADF;
+    assert_int_equal(fs_link_tree_at(&env->root, "src", &env->root, "d7"), -EBADF);
+    fs_test_hooks_reset();
+
+    /* An entry vanishes between the listing and its stat. */
+    fs_test_hooks.fstatat = hook_fstatat_fail;
+    arm_failure(1, ENOENT);
+    assert_int_equal(fs_link_tree_at(&env->root, "src", &env->root, "d8"), -ENOENT);
+    fs_test_hooks_reset();
+
+    /* The hard link is refused: another filesystem is the case the caller must see. */
+    fs_test_hooks.linkat = hook_linkat_fail;
+    arm_failure(1, EXDEV);
+    assert_int_equal(fs_link_tree_at(&env->root, "src", &env->root, "d9"), -EXDEV);
+    fs_test_hooks_reset();
+
+    /* The symlink cannot be read, is too long to trust, or cannot be recreated. */
+    fs_test_hooks.readlinkat = hook_readlinkat_fail;
+    arm_failure(1, EIO);
+    assert_int_equal(fs_link_tree_at(&env->root, "src", &env->root, "d10"), -EIO);
+    fs_test_hooks.readlinkat = hook_readlinkat_full;
+    assert_int_equal(fs_link_tree_at(&env->root, "src", &env->root, "d11"), -ENAMETOOLONG);
+    fs_test_hooks_reset();
+    fs_test_hooks.symlinkat = hook_symlinkat_fail;
+    arm_failure(1, ENOSPC);
+    assert_int_equal(fs_link_tree_at(&env->root, "src", &env->root, "d12"), -ENOSPC);
+    fs_test_hooks_reset();
+
+    /* With every seam restored the same tree mirrors. */
+    assert_int_equal(fs_link_tree_at(&env->root, "src", &env->root, "ok"), 0);
+}
+#endif
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
@@ -1512,6 +1994,10 @@ int main(void)
         cmocka_unit_test_setup_teardown(test_rename_and_unlink, env_setup, env_teardown),
         cmocka_unit_test_setup_teardown(test_fsync_helpers, env_setup, env_teardown),
         cmocka_unit_test_setup_teardown(test_file_io_all, env_setup, env_teardown),
+        cmocka_unit_test_setup_teardown(test_symlink_at, env_setup, env_teardown),
+        cmocka_unit_test_setup_teardown(test_symlink_replace_at, env_setup, env_teardown),
+        cmocka_unit_test_setup_teardown(test_write_file_atomic_at, env_setup, env_teardown),
+        cmocka_unit_test_setup_teardown(test_link_tree_at, env_setup, env_teardown),
 #ifdef FS_UTIL_TESTING
         cmocka_unit_test_setup_teardown(test_fault_root_opens, env_setup, env_teardown),
         cmocka_unit_test_setup_teardown(test_fault_verify, env_setup, env_teardown),
@@ -1521,6 +2007,9 @@ int main(void)
         cmocka_unit_test_setup_teardown(test_fault_rename_unlink_fsync, env_setup, env_teardown),
         cmocka_unit_test_setup_teardown(test_fault_eintr_opens, env_setup, env_teardown),
         cmocka_unit_test_setup_teardown(test_fault_file_io_all, env_setup, env_teardown),
+        cmocka_unit_test_setup_teardown(test_fault_symlink_helpers, env_setup, env_teardown),
+        cmocka_unit_test_setup_teardown(test_fault_write_file_atomic, env_setup, env_teardown),
+        cmocka_unit_test_setup_teardown(test_fault_link_tree, env_setup, env_teardown),
 #endif
     };
 

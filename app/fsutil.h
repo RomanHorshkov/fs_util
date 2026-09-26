@@ -90,6 +90,8 @@
  * - caller decides exactly where durability barriers belong
  * - use fs_file_fsync(), fs_file_fdatasync() and fs_dir_fsync() explicitly
  *   when crash consistency matters
+ * - the two composed helpers are the exceptions: fs_write_file_atomic_at()
+ *   and fs_symlink_replace_at() do tmp + rename + parent fsync in one call
  *
  * SIGNAL MODEL
  *
@@ -251,10 +253,13 @@ typedef struct fs_expect
  *****************************************************************************************************************************************
  */
 
-#define FS_EXPECT_ANY_MODE ((mode_t) - 1)
-#define FS_EXPECT_ANY_UID  ((uid_t) - 1)
-#define FS_EXPECT_ANY_GID  ((gid_t) - 1)
-#define FS_MODE_MASK       ((mode_t)07777)
+#define FS_EXPECT_ANY_MODE     ((mode_t) - 1)
+#define FS_EXPECT_ANY_UID      ((uid_t) - 1)
+#define FS_EXPECT_ANY_GID      ((gid_t) - 1)
+#define FS_MODE_MASK           ((mode_t)07777)
+
+/** Deepest directory nesting fs_link_tree_at() mirrors before refusing with -ELOOP. */
+#define FS_LINK_TREE_MAX_DEPTH 64
 
 /**
  * @brief Build an expectation object explicitly.
@@ -899,5 +904,86 @@ int fs_file_read_all(int fd, void* buf, size_t len);
  * be negative.
  */
 int fs_file_pread_all(int fd, void* buf, size_t len, off_t offset);
+
+/**
+ * @brief Create a symbolic link `name` under a directory capability pointing at `target`.
+ *
+ * Path rules:
+ * - `name` must be a single path component
+ * - `target` is stored verbatim: it may be relative or absolute and may contain '/'
+ *   (a link target is data, not a path this library walks); it must be non-empty
+ *
+ * Semantics:
+ * - thin wrapper around symlinkat(); an existing `name` of any type is -EEXIST
+ *
+ * Durability:
+ * - the parent directory is not fsynced; use fs_symlink_replace_at() when the link
+ *   must be durable and may already exist
+ *
+ * @return 0 on success, negative errno on failure.
+ */
+int fs_symlink_at(const fs_dir_t* parent, const char* target, const char* name);
+
+/**
+ * @brief Atomically point `name` at `target`, replacing any existing symlink, and make it durable.
+ *
+ * The one-call switch: a temporary link `<name>.tmp` is created, renamed over `name`
+ * (renameat replaces atomically, so a reader sees the old or the new target, never
+ * nothing), and the parent directory is fsynced. A stale `<name>.tmp` left by an
+ * earlier crash is removed first; on failure the temporary link is removed again.
+ *
+ * Path rules:
+ * - `name` must be a single path component short enough for the ".tmp" suffix
+ * - `target` as in fs_symlink_at()
+ *
+ * An existing `name` that is a directory is refused by the kernel (-EISDIR); any
+ * other existing entry (symlink or file) is replaced.
+ *
+ * @return 0 on success, negative errno on failure.
+ */
+int fs_symlink_replace_at(const fs_dir_t* parent, const char* target, const char* name);
+
+/**
+ * @brief Write a whole file durably and atomically: `name` holds either the old bytes or all of `buf`.
+ *
+ * The canonical composition: create `<name>.tmp` (O_EXCL, exact `mode`, umask-proof),
+ * write every byte, fsync the file, rename it over `name`, fsync the parent. A stale
+ * `<name>.tmp` from an earlier crash is removed first; on any failure the temporary
+ * file is removed and `name` is untouched.
+ *
+ * @param parent Directory capability the file lives in.
+ * @param name Single path component short enough for the ".tmp" suffix.
+ * @param buf Bytes to write; may be null only when `len` is 0.
+ * @param len Number of bytes; must not exceed SSIZE_MAX.
+ * @param mode Permission bits of the resulting file (FS_MODE_MASK).
+ * @return 0 on success, negative errno on failure (-EIO when a barrier fails: treat the
+ *         data as not written).
+ */
+int fs_write_file_atomic_at(const fs_dir_t* parent, const char* name, const void* buf, size_t len, mode_t mode);
+
+/**
+ * @brief Mirror a directory tree by hard-linking every regular file (same filesystem only).
+ *
+ * `dst_parent/dst_name` is created and filled with the shape of `src_parent/src_name`:
+ * directories are recreated with the source's permission bits, regular files are
+ * hard-linked (linkat, no data copied), symbolic links are recreated with the same
+ * target. Any other entry kind (FIFO, socket, device) refuses the whole call with
+ * -EINVAL. Nesting deeper than FS_LINK_TREE_MAX_DEPTH is refused with -ELOOP.
+ *
+ * Path rules:
+ * - `src_name` and `dst_name` are single path components
+ * - the source must be a directory (a symlink to one is -ENOTDIR: never followed)
+ * - the destination must not exist (-EEXIST): a partial mirror left by a crash is
+ *   the caller's to remove, so it can never be mistaken for a complete one
+ *
+ * A destination on another filesystem is reported as -EXDEV by the first link; the
+ * partial destination is left in place for the caller to remove.
+ *
+ * Durability:
+ * - nothing is fsynced; the caller decides where the barrier belongs
+ *
+ * @return 0 on success, negative errno on failure.
+ */
+int fs_link_tree_at(const fs_dir_t* src_parent, const char* src_name, const fs_dir_t* dst_parent, const char* dst_name);
 
 #endif /* FSUTIL_H */

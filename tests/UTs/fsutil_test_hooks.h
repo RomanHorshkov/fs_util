@@ -16,6 +16,7 @@
 #ifndef FSUTIL_TEST_HOOKS_H
 #define FSUTIL_TEST_HOOKS_H
 
+#include <dirent.h>
 #include <stddef.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -38,6 +39,12 @@ typedef struct fs_test_hooks
     int (*renameat)(int old_dirfd, const char* old_name, int new_dirfd, const char* new_name);
     int (*renameat2)(int old_dirfd, const char* old_name, int new_dirfd, const char* new_name, unsigned int flags);
     int (*unlinkat)(int dirfd, const char* name, int flags);
+    int (*symlinkat)(const char* target, int dirfd, const char* name);
+    int (*linkat)(int old_dirfd, const char* old_name, int new_dirfd, const char* new_name, int flags);
+    int (*fstatat)(int dirfd, const char* name, struct stat* st, int flags);
+    ssize_t (*readlinkat)(int dirfd, const char* name, char* buf, size_t size);
+    DIR* (*fdopendir)(int fd);
+    struct dirent* (*readdir)(DIR* dir);
 } fs_test_hooks_t;
 
 /** The live table consulted by every FS_SYS_* call in a test build. */

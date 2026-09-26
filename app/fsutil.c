@@ -23,12 +23,13 @@
 
 #include "fsutil.h"
 
+#include <dirent.h> /* DIR, fdopendir, readdir, rewinddir, closedir */
 #include <errno.h>
 #include <fcntl.h>
-#include <limits.h> /* NAME_MAX */
+#include <limits.h> /* NAME_MAX, PATH_MAX */
 #include <stdio.h>  /* renameat, renameat2, RENAME_NOREPLACE */
-#include <string.h> /* memcpy, strcmp, strchr */
-#include <unistd.h> /* close, fsync, fdatasync, read, write, pread, pwrite, unlinkat, fchmod, fchmodat, fstat, geteuid, getegid */
+#include <string.h> /* memcpy, strcmp, strchr, strlen */
+#include <unistd.h> /* close, fsync, fdatasync, read, write, pread, pwrite, unlinkat, fchmod, fchmodat, fstat, geteuid, getegid, linkat, symlinkat, readlinkat */
 
 /*****************************************************************************************************************************************
  * PRIVATE DEFINES
@@ -64,6 +65,12 @@
 #    define FS_SYS_RENAMEAT(ofd, oname, nfd, nname)         (fs_test_hooks.renameat((ofd), (oname), (nfd), (nname)))
 #    define FS_SYS_RENAMEAT2(ofd, oname, nfd, nname, flags) (fs_test_hooks.renameat2((ofd), (oname), (nfd), (nname), (flags)))
 #    define FS_SYS_UNLINKAT(dirfd, name, flags)             (fs_test_hooks.unlinkat((dirfd), (name), (flags)))
+#    define FS_SYS_SYMLINKAT(target, dirfd, name)           (fs_test_hooks.symlinkat((target), (dirfd), (name)))
+#    define FS_SYS_LINKAT(ofd, oname, nfd, nname, flags)    (fs_test_hooks.linkat((ofd), (oname), (nfd), (nname), (flags)))
+#    define FS_SYS_FSTATAT(dirfd, name, st, flags)          (fs_test_hooks.fstatat((dirfd), (name), (st), (flags)))
+#    define FS_SYS_READLINKAT(dirfd, name, buf, size)       (fs_test_hooks.readlinkat((dirfd), (name), (buf), (size)))
+#    define FS_SYS_FDOPENDIR(fd)                            (fs_test_hooks.fdopendir((fd)))
+#    define FS_SYS_READDIR(dir)                             (fs_test_hooks.readdir((dir)))
 #else
 #    define FS_SYS_OPEN(path, flags)                        open((path), (flags))
 #    define FS_SYS_OPENAT(dirfd, name, flags, mode)         openat((dirfd), (name), (flags), (mode))
@@ -81,11 +88,21 @@
 #    define FS_SYS_RENAMEAT(ofd, oname, nfd, nname)         renameat((ofd), (oname), (nfd), (nname))
 #    define FS_SYS_RENAMEAT2(ofd, oname, nfd, nname, flags) renameat2((ofd), (oname), (nfd), (nname), (flags))
 #    define FS_SYS_UNLINKAT(dirfd, name, flags)             unlinkat((dirfd), (name), (flags))
+#    define FS_SYS_SYMLINKAT(target, dirfd, name)           symlinkat((target), (dirfd), (name))
+#    define FS_SYS_LINKAT(ofd, oname, nfd, nname, flags)    linkat((ofd), (oname), (nfd), (nname), (flags))
+#    define FS_SYS_FSTATAT(dirfd, name, st, flags)          fstatat((dirfd), (name), (st), (flags))
+#    define FS_SYS_READLINKAT(dirfd, name, buf, size)       readlinkat((dirfd), (name), (buf), (size))
+#    define FS_SYS_FDOPENDIR(fd)                            fdopendir((fd))
+#    define FS_SYS_READDIR(dir)                             readdir((dir))
 #endif
 
 /* Flags shared by every directory acquisition in this file: read-only, must be a
  * directory, never survives exec(), never follows a symlink at the final component. */
 #define FS_DIR_OPEN_FLAGS (O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+
+/* Suffix of the temporary entry the composed helpers create beside their target. A fixed
+ * name (not a random one) is what lets a restart clean up after a crash. */
+#define FS_TMP_SUFFIX     ".tmp"
 
 /*****************************************************************************************************************************************
  * PRIVATE ENUMERATED TYPEDEFS
@@ -150,42 +167,54 @@ static int _fs_default_renameat2(int ofd, const char* oname, int nfd, const char
 }
 
 fs_test_hooks_t fs_test_hooks = {
-    .open      = _fs_default_open,
-    .openat    = _fs_default_openat,
-    .mkdirat   = mkdirat,
-    .fchmod    = fchmod,
-    .fchmodat  = _fs_default_fchmodat,
-    .fstat     = fstat,
-    .fcntl     = _fs_default_fcntl,
-    .fsync     = fsync,
-    .fdatasync = fdatasync,
-    .read      = read,
-    .write     = write,
-    .pread     = pread,
-    .pwrite    = pwrite,
-    .renameat  = renameat,
-    .renameat2 = _fs_default_renameat2,
-    .unlinkat  = unlinkat,
+    .open       = _fs_default_open,
+    .openat     = _fs_default_openat,
+    .mkdirat    = mkdirat,
+    .fchmod     = fchmod,
+    .fchmodat   = _fs_default_fchmodat,
+    .fstat      = fstat,
+    .fcntl      = _fs_default_fcntl,
+    .fsync      = fsync,
+    .fdatasync  = fdatasync,
+    .read       = read,
+    .write      = write,
+    .pread      = pread,
+    .pwrite     = pwrite,
+    .renameat   = renameat,
+    .renameat2  = _fs_default_renameat2,
+    .unlinkat   = unlinkat,
+    .symlinkat  = symlinkat,
+    .linkat     = linkat,
+    .fstatat    = fstatat,
+    .readlinkat = readlinkat,
+    .fdopendir  = fdopendir,
+    .readdir    = readdir,
 };
 
 void fs_test_hooks_reset(void)
 {
-    fs_test_hooks.open      = _fs_default_open;
-    fs_test_hooks.openat    = _fs_default_openat;
-    fs_test_hooks.mkdirat   = mkdirat;
-    fs_test_hooks.fchmod    = fchmod;
-    fs_test_hooks.fchmodat  = _fs_default_fchmodat;
-    fs_test_hooks.fstat     = fstat;
-    fs_test_hooks.fcntl     = _fs_default_fcntl;
-    fs_test_hooks.fsync     = fsync;
-    fs_test_hooks.fdatasync = fdatasync;
-    fs_test_hooks.read      = read;
-    fs_test_hooks.write     = write;
-    fs_test_hooks.pread     = pread;
-    fs_test_hooks.pwrite    = pwrite;
-    fs_test_hooks.renameat  = renameat;
-    fs_test_hooks.renameat2 = _fs_default_renameat2;
-    fs_test_hooks.unlinkat  = unlinkat;
+    fs_test_hooks.open       = _fs_default_open;
+    fs_test_hooks.openat     = _fs_default_openat;
+    fs_test_hooks.mkdirat    = mkdirat;
+    fs_test_hooks.fchmod     = fchmod;
+    fs_test_hooks.fchmodat   = _fs_default_fchmodat;
+    fs_test_hooks.fstat      = fstat;
+    fs_test_hooks.fcntl      = _fs_default_fcntl;
+    fs_test_hooks.fsync      = fsync;
+    fs_test_hooks.fdatasync  = fdatasync;
+    fs_test_hooks.read       = read;
+    fs_test_hooks.write      = write;
+    fs_test_hooks.pread      = pread;
+    fs_test_hooks.pwrite     = pwrite;
+    fs_test_hooks.renameat   = renameat;
+    fs_test_hooks.renameat2  = _fs_default_renameat2;
+    fs_test_hooks.unlinkat   = unlinkat;
+    fs_test_hooks.symlinkat  = symlinkat;
+    fs_test_hooks.linkat     = linkat;
+    fs_test_hooks.fstatat    = fstatat;
+    fs_test_hooks.readlinkat = readlinkat;
+    fs_test_hooks.fdopendir  = fdopendir;
+    fs_test_hooks.readdir    = readdir;
 }
 #endif
 
@@ -327,6 +356,30 @@ static void _fs_cleanup_created_file_at(int parent_fd, const char* name);
  * directories. The caller's errno is preserved across it.
  */
 static void _fs_cleanup_created_directory_at(int parent_fd, const char* name);
+
+/**
+ * @brief Build "<name>.tmp" for the composed helpers.
+ *
+ * @return 0 on success, -ENAMETOOLONG when the suffixed name does not fit `out_size`.
+ */
+static int _fs_tmp_name(const char* name, char* out, size_t out_size);
+
+/**
+ * @brief Mirror one directory: create `dst_name` under `dst_parent_fd`, then every entry of `src_fd`.
+ *
+ * @param depth Nesting level of `src_fd`; refused with -ELOOP beyond FS_LINK_TREE_MAX_DEPTH.
+ */
+static int _fs_link_tree(int src_fd, int dst_parent_fd, const char* dst_name, unsigned depth);
+
+/**
+ * @brief Mirror every entry of the open directory `src_fd` into the open directory `dst_fd`.
+ */
+static int _fs_link_entries(int src_fd, int dst_fd, unsigned depth);
+
+/**
+ * @brief Mirror one entry: recurse into a directory, hard-link a regular file, recreate a symlink.
+ */
+static int _fs_link_entry(int src_fd, int dst_fd, const char* name, unsigned depth);
 
 /*****************************************************************************************************************************************
  * PUBLIC FUNCTIONS DEFINITIONS
@@ -955,10 +1008,221 @@ int fs_file_pread_all(int fd, void* buf, size_t len, off_t offset)
     return 0;
 }
 
+int fs_symlink_at(const fs_dir_t* parent, const char* target, const char* name)
+{
+    /* Check input. The target is stored verbatim, so only emptiness is refused. */
+    if(!parent || parent->fd < 0) return -EINVAL;
+    if(STRING_IS_NULL_OR_EMPTY(target)) return -EINVAL;
+    if(!fs_component_is_valid(name)) return -EINVAL;
+
+    /* Parent must already be a valid directory capability. */
+    int rc = fs_dir_verify(parent, NULL);
+    if(rc != 0) return rc;
+
+    /* Create exactly one link entry; an existing entry of any kind is -EEXIST. */
+    if(FS_SYS_SYMLINKAT(target, parent->fd, name) != 0) return -errno;
+    return 0;
+}
+
+int fs_symlink_replace_at(const fs_dir_t* parent, const char* target, const char* name)
+{
+    char tmp_name[NAME_MAX + 1];
+
+    /* Check input. */
+    if(!parent || parent->fd < 0) return -EINVAL;
+    if(STRING_IS_NULL_OR_EMPTY(target)) return -EINVAL;
+    if(!fs_component_is_valid(name)) return -EINVAL;
+
+    /* Parent must already be a valid directory capability. */
+    int rc = fs_dir_verify(parent, NULL);
+    if(rc != 0) return rc;
+    rc = _fs_tmp_name(name, tmp_name, sizeof(tmp_name));
+    if(rc != 0) return rc;
+
+    /* A temporary link left by an earlier crash would make symlinkat() fail with EEXIST. */
+    if(FS_SYS_UNLINKAT(parent->fd, tmp_name, 0) != 0 && errno != ENOENT) return -errno;
+
+    /* Build the new link beside the old one, then swap it in with one rename. */
+    if(FS_SYS_SYMLINKAT(target, parent->fd, tmp_name) != 0) return -errno;
+    if(FS_SYS_RENAMEAT(parent->fd, tmp_name, parent->fd, name) != 0)
+    {
+        int saved_errno = errno;
+        _fs_cleanup_created_file_at(parent->fd, tmp_name);
+        return -saved_errno;
+    }
+
+    /* The switch is not a switch until the directory entry is on stable storage. */
+    return fs_dir_fsync(parent);
+}
+
+int fs_write_file_atomic_at(const fs_dir_t* parent, const char* name, const void* buf, size_t len, mode_t mode)
+{
+    char tmp_name[NAME_MAX + 1];
+    int  fd = -1;
+
+    /* Check input. A null buffer is only acceptable for an empty file. */
+    if(!parent || parent->fd < 0) return -EINVAL;
+    if(!fs_component_is_valid(name)) return -EINVAL;
+    if((!buf && len > 0) || len > (size_t)SSIZE_MAX) return -EINVAL;
+    if(!_fs_mode_is_valid(mode)) return -EINVAL;
+
+    /* Parent must already be a valid directory capability. */
+    int rc = fs_dir_verify(parent, NULL);
+    if(rc != 0) return rc;
+    rc = _fs_tmp_name(name, tmp_name, sizeof(tmp_name));
+    if(rc != 0) return rc;
+
+    /* A temporary file left by an earlier crash would block the O_EXCL create. */
+    if(FS_SYS_UNLINKAT(parent->fd, tmp_name, 0) != 0 && errno != ENOENT) return -errno;
+
+    /* Create, fill and sync the temporary file; only then does it get the real name. */
+    rc = fs_file_create_write_new_at(parent, tmp_name, mode, NULL, &fd);
+    if(rc != 0) return rc;
+    rc = fs_file_write_all(fd, buf, len);
+    if(rc != 0) goto fail;
+    rc = fs_file_fsync(fd);
+    if(rc != 0) goto fail;
+    (void)close(fd);
+    fd = -1;
+
+    if(FS_SYS_RENAMEAT(parent->fd, tmp_name, parent->fd, name) != 0)
+    {
+        rc = -errno;
+        goto fail;
+    }
+
+    /* The rename is not durable until the directory entry is on stable storage. */
+    return fs_dir_fsync(parent);
+
+fail:
+    if(fd >= 0) (void)close(fd);
+    _fs_cleanup_created_file_at(parent->fd, tmp_name);
+    return rc;
+}
+
+int fs_link_tree_at(const fs_dir_t* src_parent, const char* src_name, const fs_dir_t* dst_parent, const char* dst_name)
+{
+    /* Check input. */
+    if(!src_parent || src_parent->fd < 0 || !dst_parent || dst_parent->fd < 0) return -EINVAL;
+    if(!fs_component_is_valid(src_name) || !fs_component_is_valid(dst_name)) return -EINVAL;
+
+    /* Both parents must already be valid directory capabilities. */
+    int rc = fs_dir_verify(src_parent, NULL);
+    if(rc != 0) return rc;
+    rc = fs_dir_verify(dst_parent, NULL);
+    if(rc != 0) return rc;
+
+    /* The source must be a real directory; a symlink to one is never followed. */
+    int src_fd = _fs_openat_eintr(src_parent->fd, src_name, FS_DIR_OPEN_FLAGS, 0);
+    if(src_fd < 0) return -errno;
+
+    rc = _fs_link_tree(src_fd, dst_parent->fd, dst_name, 0U);
+    (void)close(src_fd);
+    return rc;
+}
+
 /*****************************************************************************************************************************************
  * PRIVATE FUNCTIONS DEFINITIONS
  *****************************************************************************************************************************************
  */
+
+static int _fs_tmp_name(const char* name, char* out, size_t out_size)
+{
+    /* sizeof(FS_TMP_SUFFIX) counts the terminator, so the sum is the bytes actually stored. */
+    size_t len = strlen(name);
+    if(len + sizeof(FS_TMP_SUFFIX) > out_size) return -ENAMETOOLONG;
+    memcpy(out, name, len);
+    memcpy(out + len, FS_TMP_SUFFIX, sizeof(FS_TMP_SUFFIX));
+    return 0;
+}
+
+static int _fs_link_tree(int src_fd, int dst_parent_fd, const char* dst_name, unsigned depth)
+{
+    struct stat st;
+
+    /* Bound the recursion: each level holds two directory fds. */
+    if(depth > FS_LINK_TREE_MAX_DEPTH) return -ELOOP;
+    if(FS_SYS_FSTAT(src_fd, &st) != 0) return -errno;
+    mode_t mode = st.st_mode & FS_MODE_MASK;
+
+    /* The mirror must not pre-exist (EEXIST propagates). It is created owner-writable so entries
+     * can be added, and receives the source's exact bits once it is complete. */
+    if(FS_SYS_MKDIRAT(dst_parent_fd, dst_name, mode | S_IRWXU) != 0) return -errno;
+    int dst_fd = _fs_openat_eintr(dst_parent_fd, dst_name, FS_DIR_OPEN_FLAGS, 0);
+    if(dst_fd < 0) return -errno;
+
+    int rc = _fs_link_entries(src_fd, dst_fd, depth);
+    if(rc == 0 && FS_SYS_FCHMOD(dst_fd, mode) != 0) rc = -errno;
+    (void)close(dst_fd);
+    return rc;
+}
+
+static int _fs_link_entries(int src_fd, int dst_fd, unsigned depth)
+{
+    /* fdopendir() takes ownership of its fd; scan through a duplicate so src_fd stays usable. */
+    int scan_fd = -1;
+    int rc      = _fs_dup_dir_fd(src_fd, &scan_fd);
+    if(rc != 0) return rc;
+    DIR* dir = FS_SYS_FDOPENDIR(scan_fd);
+    if(dir == NULL)
+    {
+        int saved_errno = errno;
+        (void)close(scan_fd);
+        return -saved_errno;
+    }
+    rewinddir(dir);
+
+    for(;;)
+    {
+        /* readdir() reports both the end and an error with NULL; only errno tells them apart. */
+        errno                = 0;
+        struct dirent* entry = FS_SYS_READDIR(dir);
+        if(entry == NULL)
+        {
+            if(errno != 0) rc = -errno;
+            break;
+        }
+        if(strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        rc = _fs_link_entry(src_fd, dst_fd, entry->d_name, depth);
+        if(rc != 0) break;
+    }
+    (void)closedir(dir);
+    return rc;
+}
+
+static int _fs_link_entry(int src_fd, int dst_fd, const char* name, unsigned depth)
+{
+    struct stat st;
+    if(FS_SYS_FSTATAT(src_fd, name, &st, AT_SYMLINK_NOFOLLOW) != 0) return -errno;
+
+    if(S_ISDIR(st.st_mode))
+    {
+        int child_fd = _fs_openat_eintr(src_fd, name, FS_DIR_OPEN_FLAGS, 0);
+        if(child_fd < 0) return -errno;
+        int rc = _fs_link_tree(child_fd, dst_fd, name, depth + 1U);
+        (void)close(child_fd);
+        return rc;
+    }
+    if(S_ISREG(st.st_mode))
+    {
+        /* A hard link shares the inode: no bytes move, and EXDEV names the wrong filesystem. */
+        if(FS_SYS_LINKAT(src_fd, name, dst_fd, name, 0) != 0) return -errno;
+        return 0;
+    }
+    if(S_ISLNK(st.st_mode))
+    {
+        char    target[PATH_MAX];
+        ssize_t n = FS_SYS_READLINKAT(src_fd, name, target, sizeof(target));
+        if(n < 0) return -errno;
+        if((size_t)n >= sizeof(target)) return -ENAMETOOLONG;
+        target[n] = '\0';
+        if(FS_SYS_SYMLINKAT(target, dst_fd, name) != 0) return -errno;
+        return 0;
+    }
+
+    /* FIFOs, sockets and devices have no place in a mirrored data tree. */
+    return -EINVAL;
+}
 
 static int _fs_verify_stat(const struct stat* st, enum _fs_verify_object_kind object_kind, const fs_expect_t* expect)
 {

@@ -121,6 +121,7 @@ Four workflows, the same connected graph every sibling library uses:
 - durability stays explicit: create, rename, unlink, and rmdir helpers do not fsync parent directories implicitly; `fs_file_fdatasync()` is the cheaper barrier for the commit path
 - `fs_file_write_all()` / `fs_file_read_all()` and the positional `fs_file_pwrite_all()` / `fs_file_pread_all()` loop over short transfers and EINTR; a read that hits end of file early is `-ENODATA`, never a short count
 - `open()`, `openat()`, `fsync()`, and `fdatasync()` are retried on EINTR, so a signal on a FUSE or network mount never surfaces as `-EINTR`
+- composed helpers, each one call: `fs_symlink_at()`, `fs_symlink_replace_at()` (tmp link + rename + parent fsync: the switch a reader sees as old or new, never absent), `fs_write_file_atomic_at()` (tmp + write + fsync + rename + parent fsync; the canonical atomic write), `fs_link_tree_at()` (hard-link mirror of a directory tree; another filesystem is `-EXDEV`)
 
 ## Build profiles & hardening
 
