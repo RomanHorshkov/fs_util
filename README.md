@@ -110,7 +110,7 @@ Four workflows, the same connected graph every sibling library uses:
 
 - `.github/workflows/quality.yml` - `build` → `compiler-portability` (gcc + clang, `-Werror`), `unit-tests-coverage` (release UTs + 100% gate), `integration` (all profiles) → `sanitizers` → `package-smoke` (build the `.deb`, install it, compile and run a program against ONLY the installed package). Runs on every branch push, every tag push, and every pull request; also invocable via `workflow_call`.
 - `.github/workflows/security.yml` - CodeQL and GCC's `-fanalyzer` on master/`safety_upgrades` pushes, tags, pull requests, and weekly.
-- `.github/workflows/release.yml` - on a `v*.*.*` tag: the full Quality gate, then the release bundle (tarball with header + libraries, the `.deb`, `SHA256SUMS`) published as a GitHub Release. The tag must equal `VERSION`.
+- `.github/workflows/release.yml` - on a `v*.*.*` tag: the full Quality gate, then the release bundle (tarball with header + libraries, the `.deb`, `.buildinfo`, `SHA256SUMS`) built twice on two runners, published as a GitHub Release only when every hash agrees. The tag must equal `VERSION`.
 - `.github/workflows/coverage-badge.yml` - after a successful Quality run on master, refreshes `.github/badges/coverage.svg` from the unit-test coverage summary.
 
 ## API notes
