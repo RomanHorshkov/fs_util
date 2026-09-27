@@ -54,8 +54,9 @@ Builds are driven by scripts under `utils/`.
 The repository is standalone:
 
 - every build entrypoint resolves paths from its own script location
-- the GCC profile policy is loaded from `utils/gcc_build_profiles.sh`
-- no sibling `../compilation` checkout is needed anymore
+- the GCC profile catalog and the hardening gate are the pinned `kyr-build` package's (`deps.txt`); `utils/gcc_build_profiles.sh`, `utils/check_hardening.sh` and `utils/deps.sh` are thin wrappers over `build/sysroot/share/kyr-build/`, never copies
+
+Build from a clean clone: `./utils/deps.sh sysroot && eval "$(./utils/deps.sh env)" && ./utils/run_pipeline.sh` (no sudo; every pin of `deps.txt` lands in `build/sysroot/`). Diagram: `docs/diagrams/tooling_sequence.puml`.
 
 Build static and shared libraries:
 
@@ -125,7 +126,7 @@ Four workflows, the same connected graph every sibling library uses:
 
 ## Build profiles & hardening
 
-Builds go through `utils/build_libs.sh [profile ...]`, driven by the shared catalog `utils/gcc_build_profiles.sh` (synced verbatim from `Utils/compilation/`, never edited locally); artifacts land in `build/<profile>/`; `utils/check_hardening.sh` gates every release artifact.
+Builds go through `utils/build_libs.sh [profile ...]`, driven by the profile catalog of the pinned `kyr-build` package (`deps.txt`; `utils/gcc_build_profiles.sh` and `utils/check_hardening.sh` are thin wrappers over `build/sysroot/share/kyr-build/`, never copies); artifacts land in `build/<profile>/`; `utils/check_hardening.sh` gates every release artifact.
 
 | Profile | Optimization | Warnings | Instrumentation | Hardened | Use it for |
 |---|---|---|---|---|---|
