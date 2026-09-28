@@ -68,6 +68,16 @@ run_build_stage() {
         "${SCRIPT_DIR}/build_libs.sh"
 }
 
+run_abi_stage() {
+    run_stage_with_log abi "${RUN_RESULT_DIR}/abi.log" \
+        "${SCRIPT_DIR}/check_abi.sh"
+}
+
+run_abi_exports_stage() {
+    run_stage_with_log abi_exports "${RUN_RESULT_DIR}/abi_exports.log" \
+        "${SCRIPT_DIR}/check_abi.sh" --exports "${ROOT_DIR}/build/release/libfsutil.so"
+}
+
 run_unit_release_stage() {
     run_stage_with_log unit_release "${RUN_RESULT_DIR}/unit_release.log" \
         "${SCRIPT_DIR}/build_UTs_release.sh"
@@ -125,7 +135,9 @@ export FSUTIL_RESULTS_RUN_ID="${RUN_ID}"
 
 case "${COMMAND}" in
     all)
+        run_abi_stage
         run_build_stage
+        run_abi_exports_stage
         run_unit_release_stage
         run_unit_cov_stage
         run_build_its_stage

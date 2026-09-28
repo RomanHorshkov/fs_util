@@ -1,0 +1,11 @@
+@startuml
+' claim: the public header decides both abi/layout.txt and the exports of libfsutil.so; the gate refuses any drift between them
+rectangle "app/fsutil.h" as H
+rectangle "abi/layout.txt\n(committed, SemVer-gated)" as L
+rectangle "utils/fsutil.map\nFSUTIL_<major> { exactly the declared functions }" as M
+rectangle "build/release/libfsutil.so" as S
+H --> L : utils/check_abi.sh (stage abi)
+L --> M : the function lines
+M --> S : --version-script
+S ..> L : utils/check_abi.sh --exports (stage abi-exports)
+@enduml

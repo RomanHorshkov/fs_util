@@ -1,0 +1,48 @@
+# fs_util public ABI, written by check_abi.sh --update (kyr-build): a changed line needs a major, a new name a minor.
+major 1
+data_model pointer 8 long 8
+struct fs_dir_t size 4 align 4
+  field fd offset 0 size 4
+struct fs_expect_t size 12 align 4
+  field mode offset 0 size 4
+  field uid offset 4 size 4
+  field gid offset 8 size 4
+function fs_component_is_valid returns int params 1 (const char *)
+function fs_dir_close returns void params 1 (fs_dir_t *)
+function fs_dir_create_at returns int params 6 (const fs_dir_t *, const char *, mode_t, const fs_expect_t *, fs_dir_t *, enum fs_create_disposition *)
+function fs_dir_fsync returns int params 1 (const fs_dir_t *)
+function fs_dir_init returns void params 1 (fs_dir_t *)
+function fs_dir_open_abs returns int params 3 (const char *, const fs_expect_t *, fs_dir_t *)
+function fs_dir_open_abs_nofollow returns int params 3 (const char *, const fs_expect_t *, fs_dir_t *)
+function fs_dir_open_at returns int params 4 (const fs_dir_t *, const char *, const fs_expect_t *, fs_dir_t *)
+function fs_dir_open_cwd returns int params 1 (fs_dir_t *)
+function fs_dir_verify returns int params 2 (const fs_dir_t *, const fs_expect_t *)
+function fs_dir_walk_create returns int params 5 (const fs_dir_t *, const char *, mode_t, const fs_expect_t *, fs_dir_t *)
+function fs_dir_walk_open returns int params 4 (const fs_dir_t *, const char *, const fs_expect_t *, fs_dir_t *)
+function fs_expect_make returns fs_expect_t params 3 (mode_t, uid_t, gid_t)
+function fs_expect_private returns fs_expect_t params 1 (mode_t)
+function fs_file_create_write_new_at returns int params 5 (const fs_dir_t *, const char *, mode_t, const fs_expect_t *, int *)
+function fs_file_fdatasync returns int params 1 (int)
+function fs_file_fsync returns int params 1 (int)
+function fs_file_open_read_at returns int params 4 (const fs_dir_t *, const char *, const fs_expect_t *, int *)
+function fs_file_open_rw_at returns int params 4 (const fs_dir_t *, const char *, const fs_expect_t *, int *)
+function fs_file_pread_all returns int params 4 (int, void *, size_t, off_t)
+function fs_file_pwrite_all returns int params 4 (int, const void *, size_t, off_t)
+function fs_file_read_all returns int params 3 (int, void *, size_t)
+function fs_file_verify returns int params 2 (int, const fs_expect_t *)
+function fs_file_write_all returns int params 3 (int, const void *, size_t)
+function fs_link_tree_at returns int params 4 (const fs_dir_t *, const char *, const fs_dir_t *, const char *)
+function fs_rename_at returns int params 4 (const fs_dir_t *, const char *, const fs_dir_t *, const char *)
+function fs_rename_noreplace_at returns int params 4 (const fs_dir_t *, const char *, const fs_dir_t *, const char *)
+function fs_rmdir_at returns int params 2 (const fs_dir_t *, const char *)
+function fs_symlink_at returns int params 3 (const fs_dir_t *, const char *, const char *)
+function fs_symlink_replace_at returns int params 3 (const fs_dir_t *, const char *, const char *)
+function fs_unlink_at returns int params 2 (const fs_dir_t *, const char *)
+function fs_write_file_atomic_at returns int params 5 (const fs_dir_t *, const char *, const void *, size_t, mode_t)
+constant FS_EXPECT_ANY_GID 4294967295
+constant FS_EXPECT_ANY_MODE 4294967295
+constant FS_EXPECT_ANY_UID 4294967295
+constant FS_LINK_TREE_MAX_DEPTH 64
+constant FS_MODE_MASK 4095
+enumerator FS_CREATE_DISPOSITION_CREATED_NEW 1
+enumerator FS_CREATE_DISPOSITION_OPENED_EXISTING 0

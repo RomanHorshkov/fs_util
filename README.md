@@ -149,3 +149,5 @@ Release hardening by stage:
 | `-Wl,-z,relro -Wl,-z,now` | link | GOT/PLT read-only after load — full RELRO |
 | `-Wl,-z,noexecstack` | link | non-executable stack asserted |
 | `-Wl,-z,defs` | link .so | undefined symbols fail the build not the load |
+
+ABI: `abi/layout.txt` is the committed public ABI of `app/fsutil.h` (layouts, enumerator values, callbacks, function signatures, numeric constants), checked by kyr-build's gate through `utils/check_abi.sh` (pipeline stages `abi` and `abi-exports`): a changed line needs a raised major, a new public name a raised minor, and `libfsutil.so` exports exactly the declared functions as `<name>@@FSUTIL_<major>` (`utils/fsutil.map`); `utils/fs_util_project.sh` says what is public. Debs through kyr-build's `lib/deb.sh` (`X-Kyr-Tier`, byte-reproducible). Diagram: `docs/diagrams/abi_exports.puml`.
