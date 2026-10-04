@@ -25,11 +25,12 @@ It avoids string-built absolute paths. Open a trusted directory once, then opera
 - `VERSION` - package/library version
 - `app/fsutil.h` - public API
 - `app/fsutil.c` - implementation
-- `utils/` - build, test, coverage, packaging, and formatting scripts
+- `utils/` - kyr-build's wrappers and `fs_util_project.sh` (the declarations)
 - `tests/UTs/` - cmocka unit tests (contract tests + fault-injection tests through the private syscall seam `tests/UTs/fsutil_test_hooks.h`, the latter compiled only with `-DFS_UTIL_TESTING`)
 - `tests/ITs/` - cmocka integration tests, run against every build profile, static and shared
 - `tests/results/UTs/` - unit-test coverage outputs (HTML/XML/JSON, 100% line + branch gate)
-- `tests/results/ITs/` - integration-test runs and coverage outputs
+- `tests/results/ITs/coverage/` - integration-test coverage outputs
+- `tests/package/smoke.c` - the installed-package test
 - `build/` - generated objects, libraries, test binaries, and `.deb` artifacts
 
 ## Platform
@@ -49,37 +50,21 @@ All functions return:
 
 ## Build
 
-Builds are driven by scripts under `utils/`.
-
-The repository is standalone:
-
-- every build entrypoint resolves paths from its own script location
-- the GCC profile catalog and the hardening gate are the pinned `kyr-build` package's (`deps.txt`); `utils/gcc_build_profiles.sh`, `utils/check_hardening.sh` and `utils/deps.sh` are thin wrappers over `build/sysroot/share/kyr-build/`, never copies
+`utils/` holds the pinned kyr-build's wrappers and `utils/fs_util_project.sh`, which declares what is built, tested and packaged (the steps are kyr-build's, its README "Wrapper contract").
 
 Build from a clean clone: `./utils/deps.sh sysroot && eval "$(./utils/deps.sh env)" && ./utils/run_pipeline.sh` (no sudo; every pin of `deps.txt` lands in `build/sysroot/`). Diagram: `docs/diagrams/tooling_sequence.puml`.
 
-Build static and shared libraries:
-
-```sh
-./utils/build_libs.sh
-```
-
-Artifacts:
-
-- `build/<profile>/libfsutil.a`
-- `build/<profile>/libfsutil.so`
-- optional coverage variant: `build/release_cov/libfsutil.a`
-- optional coverage variant: `build/release_cov/libfsutil.so`
+`./utils/build_libs.sh [profile ...]` writes `build/<profile>/libfsutil.a` and `libfsutil.so.<VERSION>` (no argument: every profile).
 
 ## Testing
 
 Both suites use `cmocka`. Scripts under `utils/` follow the house naming shared with uuid7/EMlog/SPSCring/MPSCring:
 
-- `utils/build_UTs_release.sh` compiles `tests/UTs/*.c` at `-O2` and links them against `build/release/libfsutil.a`, the exact object code that gets packaged. The fault-injection tests are compiled out here, so this run proves the shipped library honours every documented contract.
+- `utils/build_UTs_release.sh` compiles `tests/UTs/*.c` with the release profile and links them against `build/release/libfsutil.a`, the exact object code that gets packaged. The fault-injection tests are compiled out here, so this run proves the shipped library honours every documented contract.
 - `utils/build_UTs.sh` compiles `app/fsutil.c` once, instrumented, with `-DFS_UTIL_TESTING` (every kernel call goes through a replaceable function pointer), runs every unit-test executable against it, and gates on **100% line and 100% branch** coverage of `app/fsutil.c`. The fault-injection tests are what reach the cleanup paths a real filesystem never produces on demand: `fchmod()` failing on a file just created, `fchmodat()` failing on a directory just created, `fstat()` failing on an open fd, `fcntl()` refusing `F_GETFL`, `fsync()` reporting `EIO`, a cleanup `unlinkat()` clobbering `errno`, `open()` interrupted by a signal, `write()` accepting one byte per call or none at all.
-- `utils/build_ITs.sh` + `utils/run_ITs.sh` build and run the integration suite for every profile in the catalog (`debug`, `audit`, `sanitize`, `release`, `native`, `extreme`, plus `release_cov`), static and shared, and archive an HTML report under `tests/results/ITs/runs/<run id>/`.
+- `utils/build_ITs.sh` builds and runs the integration suite against every profile in the catalog (`debug`, `audit`, `sanitize`, `release`, `native`, `extreme`), static and shared, then once at the coverage profile (`tests/results/ITs/coverage/`).
 - `utils/build_sanitizer_tests.sh` runs UTs and ITs under ASan, UBSan, and LSan with the seam enabled, so an fd leaked on an injected error path is caught.
-- `utils/run_pipeline.sh` runs the whole board: `build`, `unit_release`, `unit_cov`, `build_ITs`, `run_ITs`, `sanitizers`, `package`. Each stage is also invocable on its own.
+- `utils/run_pipeline.sh` runs the whole board: deps and tiers, template, ABI, every profile, release UTs, coverage UTs, ITs, sanitizers, package, and the smoke test against the built debs (`utils/smoke_test_package.sh`, `tests/package/smoke.c`). Each wrapper also runs on its own.
 
 ```sh
 ./utils/run_pipeline.sh
@@ -89,15 +74,13 @@ Symlink rejection note: a symlink where a directory is required is refused by `o
 
 ## Packaging
 
-Build the Debian package:
+Build the Debian packages:
 
 ```sh
 ./utils/build_deb.sh
 ```
 
-Compatibility wrapper:
-
-Artifact:
+Artifacts:
 
 - `build/debs/libfsutil_<VERSION>_<ARCH>.deb` — runtime: `/usr/local/lib/libfsutil.so.<VERSION>`, `libfsutil.so.<MAJOR>`
 - `build/debs/libfsutil-dev_<VERSION>_<ARCH>.deb` — development: `/usr/local/include/fsutil.h`, `/usr/local/include/utils/fsutil.h`, `/usr/local/lib/libfsutil.a`, `libfsutil.so` linker symlink, `pkgconfig/fsutil.pc`; depends on `libfsutil (= <VERSION>)`
