@@ -29,6 +29,7 @@
 #include <limits.h> /* NAME_MAX, PATH_MAX */
 #include <stdio.h>  /* renameat, renameat2, RENAME_NOREPLACE */
 #include <string.h> /* memcpy, strcmp, strchr, strlen */
+#include <time.h>   /* nanosleep */
 #include <unistd.h> /* close, fsync, fdatasync, read, write, pread, pwrite, unlinkat, fchmod, fchmodat, fstat, geteuid, getegid, linkat, symlinkat, readlinkat */
 
 /*****************************************************************************************************************************************
@@ -98,11 +99,17 @@
 
 /* Flags shared by every directory acquisition in this file: read-only, must be a
  * directory, never survives exec(), never follows a symlink at the final component. */
-#define FS_DIR_OPEN_FLAGS (O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+#define FS_DIR_OPEN_FLAGS   (O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
 
 /* Suffix of the temporary entry the composed helpers create beside their target. A fixed
  * name (not a random one) is what lets a restart clean up after a crash. */
-#define FS_TMP_SUFFIX     ".tmp"
+#define FS_TMP_SUFFIX       ".tmp"
+
+/* fs_dir_create_at() meeting a directory another creator made a moment ago: until that creator's fchmodat() lands, the
+ * directory carries the mode mkdirat() gave it (the umask's cut, the setgid bit a setgid parent hands down), so its
+ * expectation is checked again FS_DIR_SETTLE_TRIES times, FS_DIR_SETTLE_NS apart (50 ms at most), before it is refused. */
+#define FS_DIR_SETTLE_TRIES 50
+#define FS_DIR_SETTLE_NS    1000000L
 
 /*****************************************************************************************************************************************
  * PRIVATE ENUMERATED TYPEDEFS
@@ -671,6 +678,13 @@ int fs_dir_create_at(const fs_dir_t* parent, const char* name, mode_t create_mod
 
     /* Apply the caller's full expectation policy to the resulting directory. */
     rc = fs_dir_verify(&(fs_dir_t){.fd = fd}, expect);
+
+    /* A directory this call did not create may be another creator's, still between its mkdirat() and its fchmodat(). */
+    for(int tries = 0; rc == -EACCES && create_disposition == FS_CREATE_DISPOSITION_OPENED_EXISTING && tries < FS_DIR_SETTLE_TRIES; ++tries)
+    {
+        (void)nanosleep(&(struct timespec){.tv_sec = 0, .tv_nsec = FS_DIR_SETTLE_NS}, NULL);
+        rc = fs_dir_verify(&(fs_dir_t){.fd = fd}, expect);
+    }
     if(rc != 0)
     {
         /* Verification failure means we must not leak the temporary fd. */

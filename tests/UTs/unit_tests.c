@@ -297,6 +297,13 @@ static int hook_fstat_fail(int fd, struct stat* st)
     if(counted_failure()) return -1;
     return fstat(fd, st);
 }
+/* another creator's fchmodat() landing: on the armed call the directory takes g_settle_mode before it is read */
+static mode_t g_settle_mode;
+static int    hook_fstat_settles(int fd, struct stat* st)
+{
+    if(++g_call_count == g_fail_on_call) (void)fchmod(fd, g_settle_mode);
+    return fstat(fd, st);
+}
 static int hook_fcntl_fail(int fd, int cmd, int arg)
 {
     if((g_fcntl_cmd_filter < 0 || cmd == g_fcntl_cmd_filter) && counted_failure()) return -1;
@@ -1329,6 +1336,19 @@ static void test_fault_dir_create_at(void** state)
     assert_true(entry_exists(&env->root, "e"));
     fs_test_hooks_reset();
     assert_int_equal(d.fd, -1);
+
+    /* An existing directory whose creator has not reached its fchmodat() yet (mkdirat's 0700 for 0750) is checked again
+     * and taken once its mode lands: fstat #1 verifies the parent, #2 reads 0700, #3 the creator's 0750. */
+    make_dir(&env->root, "s", 0700);
+    fs_expect_t settled = fs_expect_private(0750);
+    g_settle_mode       = 0750;
+    fs_test_hooks.fstat = hook_fstat_settles;
+    arm_failure(3, 0);
+    assert_int_equal(fs_dir_create_at(&env->root, "s", 0750, &settled, &d, &disp), 0);
+    assert_int_equal(disp, FS_CREATE_DISPOSITION_OPENED_EXISTING);
+    assert_int_equal(g_call_count, 3);
+    fs_dir_close(&d);
+    fs_test_hooks_reset();
 }
 
 static void test_fault_walks(void** state)

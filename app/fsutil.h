@@ -522,6 +522,9 @@ int fs_dir_open_at(const fs_dir_t* parent, const char* name, const fs_expect_t* 
  *   (fchmodat() under the parent capability, before the directory is opened)
  *   so the result is independent of the process umask: even a umask that
  *   strips the owner's read/search bits cannot make the create fail
+ * - an existing directory that fails `expect` may be another creator's, not
+ *   yet past its fchmodat(): it is checked again for up to 50 ms before the
+ *   call answers -EACCES, so concurrent creators of one name all succeed
  *
  * Path rules:
  * - `name` must be a single path component
