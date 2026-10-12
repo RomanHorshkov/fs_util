@@ -26,14 +26,12 @@ KYR_IT_PROFILES=("${GCC_BUILD_PROFILES[@]}")
 KYR_IT_LINKAGES=(static shared)
 KYR_IT_COVERAGE=1
 
-# libfsutil and libfsutil-dev (the header also as <utils/fsutil.h>, fsutil.pc).
+# libfsutil and libfsutil-dev (the header, fsutil.pc).
 KYR_PKG="libfsutil"
 KYR_PKG_DESCRIPTION="Strict capability-oriented filesystem helper library"
-KYR_DEB_HEADERS=(app/fsutil.h app/fsutil.h:utils)
+KYR_DEB_HEADERS=(app/fsutil.h)
 KYR_DEB_DEV_FIELDS=("Breaks: libfsutil (<< @VERSION@)" "Replaces: libfsutil (<< @VERSION@)")
 KYR_DEB_DEV_DESCRIPTION="Development files for libfsutil (headers, static library, linker symlink, pkg-config)"
-KYR_PC_VARIABLES=('utilsincludedir=${includedir}/utils')
-KYR_PC_CFLAGS='-I${includedir} -I${utilsincludedir}'
 KYR_SMOKE_CPPFLAGS=(-D_GNU_SOURCE)
 
 # The public ABI: app/fsutil.h; the linker map's node is FSUTIL_<major>.
