@@ -193,11 +193,12 @@ static int test_env_setup(void** state)
 static int test_env_teardown(void** state)
 {
     test_env_t* env = *state;
+    int         rc  = 0;
     if(env == NULL) return 0;
 
     if(env->old_cwd_fd >= 0)
     {
-        (void)fchdir(env->old_cwd_fd);
+        if(fchdir(env->old_cwd_fd) != 0) rc = -1; /* the next test would start in a removed directory */
         (void)close(env->old_cwd_fd);
     }
 
@@ -210,7 +211,7 @@ static int test_env_teardown(void** state)
 
     (void)rmdir(env->root_path);
     free(env);
-    return 0;
+    return rc;
 }
 
 static int remove_tree_at(int dir_fd)
