@@ -1227,7 +1227,7 @@ static void test_file_io_all(void** state)
 
     /* Positional I/O on a pipe is refused by the kernel; the error propagates as is. */
     int pfd[2];
-    assert_int_equal(pipe(pfd), 0);
+    if(pipe(pfd) != 0) fail(); /* fail() stops the test; an assert_* returns as far as the analyzer knows, and pfd is used below */
     assert_int_equal(fs_file_pwrite_all(pfd[1], "x", 1, 0), -ESPIPE);
     assert_int_equal(fs_file_pread_all(pfd[0], buf, 1, 0), -ESPIPE);
     assert_int_equal(fs_file_write_all(pfd[1], "pipe", 4), 0);
