@@ -18,6 +18,8 @@ KYR_SUITE_UT_EACH=1
 KYR_SUITE_UT_CPPFLAGS=(-D_GNU_SOURCE -I"${ROOT_DIR}/tests/UTs")
 KYR_UT_FAIL_UNDER_LINE=100
 KYR_UT_FAIL_UNDER_BRANCH=100
+# The coverage badge (.github/badges/coverage.svg, the README's Coverage line, and its endpoint JSON) from the gated run's summary.
+KYR_PIPELINE_EXTRA=("post|coverage-badge|[[ ! -f tests/results/UTs/coverage-summary.json ]] || python3 build/sysroot/share/kyr-build/coverage_badge.py tests/results/UTs/coverage-summary.json .github/badges/coverage.json .github/badges/coverage.svg")
 # The integration suite against every profile's archive and shared object, then the coverage run.
 KYR_IT_SUITES=(it)
 KYR_SUITE_IT_SOURCES=(tests/ITs/integration_test.c)
