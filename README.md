@@ -113,12 +113,12 @@ Builds go through `utils/build_libs.sh [profile ...]`, driven by the profile cat
 
 | Profile | Optimization | Warnings | Instrumentation | Hardened | Use it for |
 |---|---|---|---|---|---|
-| debug | `-Og -g3` | core | — | no | day-to-day development |
-| audit | `-O1 -g3` | everything + `-fanalyzer` | — | yes | compiler-driven validation |
-| sanitize | `-O1 -g3` | strict | ASan+UBSan+LSan | yes minus FORTIFY — conflicts with ASan | runtime bug hunting |
-| release | `-O2 -DNDEBUG` | strict | — | yes — full set below | production / the deb payload |
-| native | `-O3 -flto -march=native` | strict | — | yes | benchmarks on the deploy box |
-| extreme | `-O3 -flto -march=native` | core | — | deliberately none | max-perf experiments only |
+| debug | `-Og -g3` | the whole set, `-Werror` | — | no | day-to-day development |
+| audit | `-O1 -g3` | the whole set, `-Werror`, + `-fanalyzer` | — | yes | compiler-driven validation |
+| sanitize | `-O1 -g3` | the whole set, `-Werror` | ASan+UBSan+LSan | yes minus FORTIFY — conflicts with ASan | runtime bug hunting |
+| release | `-O2 -DNDEBUG` | the whole set, `-Werror` | — | yes — full set below | production / the deb payload |
+| native | `-O3 -flto=auto -march=native` | the whole set, `-Werror` | — | yes | benchmarks on the deploy box |
+| extreme | `-O3 -flto=auto -march=native` | the whole set, `-Werror` | — | deliberately none | max-perf experiments only |
 
 Release hardening by stage:
 
@@ -135,6 +135,6 @@ Release hardening by stage:
 
 ABI: `abi/layout.txt` is the committed public ABI of `app/fsutil.h` (layouts, enumerator values, callbacks, function signatures, numeric constants), checked by kyr-build's gate through `utils/check_abi.sh` (pipeline stages `abi` and `abi-exports`): a changed line needs a raised major, a new public name a raised minor, and `libfsutil.so` exports exactly the declared functions as `<name>@@FSUTIL_<major>` (`utils/fsutil.map`); `utils/fs_util_project.sh` says what is public. Debs through kyr-build's `lib/deb.sh` (`X-Kyr-Tier`, byte-reproducible). Diagram: `docs/diagrams/abi_exports.puml`.
 
-Legacy names: `utils/check_legacy_names.sh` (kyr-build 3.0.0's check and patterns, copied until it is pinned) refuses a pre-kyr name in the tracked text; `legacy_names.allow` fences history only.
+Legacy names: the pipeline's legacy-names stage (the pinned kyr-build 3.1.1's `check_legacy_names.sh` and patterns) refuses a pre-kyr name in the tracked text; `legacy_names.allow` fences history only.
 
 History: 1.3.0 installs the header under include/ only and runs the legacy-names check.
